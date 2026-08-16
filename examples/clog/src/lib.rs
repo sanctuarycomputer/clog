@@ -12,3 +12,6 @@ pub use types::*;
 
 /// Observe-time validation rules (spec §10).
 pub(crate) mod validate;
+
+/// Pure scoring functions (spec §5.4).
+pub(crate) mod score;
