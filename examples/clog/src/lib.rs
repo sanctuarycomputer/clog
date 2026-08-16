@@ -15,3 +15,7 @@ pub(crate) mod validate;
 
 /// Pure scoring functions (spec §5.4).
 pub(crate) mod score;
+
+/// Belief resolution: the total order that decides which claim is believed
+/// per subject (spec §5.3).
+pub(crate) mod belief;
