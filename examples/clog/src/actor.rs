@@ -28,7 +28,8 @@ use imbl::OrdMap;
 
 use crate::alias::EntityKey;
 use crate::clock::Clock;
-use crate::engine::naive::{NaiveCfg, NaiveEngine, entity_state, is_reserved};
+use crate::engine::naive::{ENTITY_STATE_ROWS, NaiveCfg, NaiveEngine, entity_state, is_reserved};
+use crate::engine::{merge_body, merge_key};
 use crate::engine::{Batch, Engine, Event, StoredClaim, WorldViews};
 use crate::kinds::{self, RuleSet};
 use crate::render::template::{DEFAULT_TEMPLATE, Template, parse};
@@ -47,11 +48,9 @@ pub(crate) const DEFAULT_SCOPE: &str = "default";
 
 /// The observer every claim clog writes about itself carries (INV-8).
 const CLOG_OBSERVER: &str = "clog";
-/// The `source_ref` of a merge claim.
+/// The `source_ref` of a merge claim. The key and body come from
+/// [`merge_key`]/[`merge_body`], the one home of that wire format.
 const MERGE_SOURCE_REF: &str = "clog:merge";
-/// The field separator inside a merge claim's body (ASCII unit separator);
-/// see `engine::naive` for the wire format this half writes.
-const MERGE_SEP: &str = "\u{1f}";
 /// `select`'s row cap when the caller names none.
 const DEFAULT_LIMIT: usize = 50;
 /// The largest row cap `select` will honour, whatever the caller asks for.
@@ -400,16 +399,23 @@ impl Writer {
     /// the alias map it rebuilds from is unchanged either way.
     fn merge_entities(&mut self, alias: &EntityRef, canonical: &EntityRef) -> Result<Ack, ClogError> {
         let (alias_key, canonical_key) = (alias.key(), canonical.key());
-        // U-ALIAS-2: the edge is inserted flattened, so it cycles exactly
-        // when the flattened target is the alias itself (`b -> a` after
-        // `a -> b`, or the self-loop `a -> a`).
+        // A self-merge is a cycle whatever the alias map says, and it has to
+        // be caught *before* flattening: once `a` is aliased to `b`,
+        // `flatten_target(a)` is `b`, so the check below would wave
+        // `merge_entities(a, a)` through and mint an inert `a -> a` claim.
+        if alias_key == canonical_key {
+            return Err(ClogError::AliasCycle);
+        }
+        // U-ALIAS-2: the edge is inserted flattened, so it otherwise cycles
+        // exactly when the flattened target is the alias itself — `b -> a`
+        // after `a -> b`.
         if self.engine.views().aliases.flatten_target(&canonical_key) == alias_key {
             return Err(ClogError::AliasCycle);
         }
 
         let now = self.clock.now_ms();
         let mut claim = Claim {
-            claim_key: format!("clog:merge:{}:{}->{}:{}", alias_key.0, alias_key.1, canonical_key.0, canonical_key.1),
+            claim_key: merge_key(&alias_key, &canonical_key),
             subject_key: None,
             source_ref: MERGE_SOURCE_REF.to_string(),
             observer: ObserverId::from(CLOG_OBSERVER),
@@ -419,9 +425,7 @@ impl Writer {
             reliability: Reliability::A,
             credibility: Credibility::One,
             entities: vec![alias.clone(), canonical.clone()],
-            body: [&alias_key.0, &alias_key.1, &canonical_key.0, &canonical_key.1]
-                .map(String::as_str)
-                .join(MERGE_SEP),
+            body: merge_body(&alias_key, &canonical_key),
         };
         validate_claim(0, &claim, true)?;
         claim.entities.clear();
@@ -686,20 +690,31 @@ pub(crate) fn select(snapshot: &WorldSnapshot, view: View, filter: Filter) -> Re
                 .filter_map(|(score, key)| Some((key.as_str(), views.claims.get(key.as_str())?, Some(*score))))
                 .collect()
         }
-        // `entity_state` orders its rows newest-first for the renderer; a
-        // selected row set is addressed by key, so subjects are re-sorted
-        // ascending here. One claim can be the believed answer for an entity
-        // under several entities at once, and then it appears once per
-        // entity — the row set is (entity, subject) shaped, not a claim set.
+        // Uncapped: §5.3's N=8 is a *rendering* cap, and a structured read
+        // must be able to enumerate everything believed about an entity —
+        // silently returning the newest 8 of 30 subjects would give the
+        // caller no way to tell the world had been truncated. `Filter.limit`
+        // is the only cap here, and it is the caller's own.
+        //
+        // `entity_state` orders each entity's rows newest-first for the
+        // renderer; a selected row set is addressed by key, so subjects are
+        // re-sorted ascending, giving (canonical entity, subject) ascending
+        // over the whole set. A claim believed under several entities is
+        // reported once, at its lowest-ordered entity: `Row` carries no
+        // entity field, so repeats would be byte-identical and
+        // indistinguishable — noise, not information.
         View::EntityState => {
             let mut rows = Vec::new();
-            for (_, _, mut believed) in entity_state(views) {
+            let mut seen: BTreeSet<&str> = BTreeSet::new();
+            for (_, _, mut believed) in entity_state(views, None) {
                 believed.sort_by(|a, b| a.0.cmp(&b.0));
                 for (_, stored) in believed {
                     // Re-borrowed out of the snapshot so the row keeps the
                     // snapshot's lifetime rather than `entity_state`'s clone.
-                    if let Some(stored) = views.claims.get(stored.claim.claim_key.as_str()) {
-                        rows.push((stored.claim.claim_key.as_str(), stored, None));
+                    let Some(stored) = views.claims.get(stored.claim.claim_key.as_str()) else { continue };
+                    let key = stored.claim.claim_key.as_str();
+                    if seen.insert(key) {
+                        rows.push((key, stored, None));
                     }
                 }
             }
@@ -850,7 +865,7 @@ fn slot_inputs(views: &WorldViews, scope: &str, rev: Rev, as_of_ms: u64) -> Slot
     // newest-first). An entity nobody believes anything about contributes
     // no summaries, and a bare "Name: " line says nothing, so it is dropped
     // rather than rendered empty.
-    let entities = entity_state(views)
+    let entities = entity_state(views, Some(ENTITY_STATE_ROWS))
         .into_iter()
         .filter(|(_, _, rows)| !rows.is_empty())
         .map(|(_, display, rows)| EntityItem {

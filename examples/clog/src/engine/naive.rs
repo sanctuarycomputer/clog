@@ -13,19 +13,8 @@
 //! Reserved-namespace claims (`clog:*`) live in `views.claims` like any other
 //! claim, but are filtered out of `unclassified`, `open_loops`, `believed`
 //! and `urgent` (INV-8). They still *drive* state: a merge claim's body is
-//! the alias edge.
-//!
-//! **Merge claim wire format.** A merge claim's `claim_key` starts with
-//! `clog:merge:` and its `body` is exactly four fields joined with the ASCII
-//! unit separator (`U+001F`):
-//!
-//! ```text
-//! alias.etype ␟ alias.id ␟ canonical.etype ␟ canonical.id
-//! ```
-//!
-//! Unit-separated rather than JSON so the engine needs no parser and no extra
-//! dependency; §10 validation already rejects control characters in every
-//! host-supplied field, so the separator cannot appear in an entity key.
+//! the alias edge, parsed back out by [`merge_edge`] using the wire format
+//! defined in [`crate::engine`].
 
 use std::collections::BTreeMap;
 
@@ -33,19 +22,15 @@ use imbl::{OrdMap, OrdSet};
 
 use crate::alias::{AliasMap, EntityKey};
 use crate::belief::{self, BeliefInput};
-use crate::engine::{ApplyResult, Engine, Event, StoredClaim, WorldViews};
+use crate::engine::{ApplyResult, Engine, Event, MERGE_PREFIX, MERGE_SEP, StoredClaim, WorldViews};
 use crate::score::score_claim;
 use crate::types::{Claim, Credibility, Focus, JudgeSource, KindLabel, ObserverId};
 
 /// The namespace reserved for clog's own claims (INV-8).
 const RESERVED_PREFIX: &str = "clog:";
-/// The key prefix identifying a merge (entity alias) claim.
-const MERGE_PREFIX: &str = "clog:merge:";
-/// The field separator inside a merge claim's body (ASCII unit separator).
-const MERGE_SEP: char = '\u{1f}';
-/// How many recent believed claims `entity_state` reports per entity
-/// (spec §5.3's internal constant N).
-const ENTITY_STATE_ROWS: usize = 8;
+/// How many recent believed claims the *rendered* entities slot reports per
+/// entity (spec §5.3's constant N, which §5.3 scopes to rendering alone).
+pub(crate) const ENTITY_STATE_ROWS: usize = 8;
 
 /// Whether `claim_key` is in the reserved namespace (INV-8).
 pub(crate) fn is_reserved(claim_key: &str) -> bool {
@@ -53,7 +38,8 @@ pub(crate) fn is_reserved(claim_key: &str) -> bool {
 }
 
 /// Parses the alias edge carried by a merge claim, or `None` if `claim` is
-/// not a merge claim (or its body is malformed).
+/// not a merge claim (or its body is malformed). The inverse of
+/// [`crate::engine::merge_body`].
 fn merge_edge(claim: &Claim) -> Option<(EntityKey, EntityKey)> {
     if !claim.claim_key.starts_with(MERGE_PREFIX) {
         return None;
@@ -417,9 +403,16 @@ pub(crate) type EntityStateRow = (EntityKey, String, Vec<(String, StoredClaim)>)
 /// subject-less claims produce no rows, and reserved claims are excluded
 /// throughout (INV-8; `believed` already skips them).
 ///
-/// Rows are newest-first by `occurred_at`, ties broken by `claim_key` ascending
-/// (the same tiebreak `urgent` uses), then capped at [`ENTITY_STATE_ROWS`].
-pub(crate) fn entity_state(views: &WorldViews) -> Vec<EntityStateRow> {
+/// Rows are newest-first by `occurred_at`, ties broken by `claim_key`
+/// ascending (the same tiebreak `urgent` uses).
+///
+/// `cap` truncates each entity's rows **after** that ordering, so a cap keeps
+/// the newest. It is `Some(ENTITY_STATE_ROWS)` for the rendered entities slot
+/// and `None` for `select`: §5.3 scopes N to rendering ("for rendering"), and
+/// a structured read must be able to enumerate everything that is believed
+/// about an entity — a reader that silently saw only the newest 8 of 30
+/// subjects would have no way to tell it was looking at a truncated world.
+pub(crate) fn entity_state(views: &WorldViews, cap: Option<usize>) -> Vec<EntityStateRow> {
     let mut out = Vec::new();
     for (entity, keys) in views.by_entity.iter() {
         let display = match views.names.get(entity) {
@@ -442,7 +435,9 @@ pub(crate) fn entity_state(views: &WorldViews) -> Vec<EntityStateRow> {
         rows.sort_by(|a, b| {
             b.1.claim.occurred_at.cmp(&a.1.claim.occurred_at).then_with(|| a.1.claim.claim_key.cmp(&b.1.claim.claim_key))
         });
-        rows.truncate(ENTITY_STATE_ROWS);
+        if let Some(cap) = cap {
+            rows.truncate(cap);
+        }
         out.push((entity.clone(), display, rows));
     }
     out
@@ -570,27 +565,33 @@ mod tests {
     #[test]
     fn reserved_claims_invisible_in_urgent_and_loops() {
         let mut e = NaiveEngine::new(cfg());
-        let mut c = tests_base_claim();
-        c.claim_key = "clog:merge:p:a->p:b".into();
-        c.body = ["p", "a", "p", "b"].join("\u{1f}");
-        e.apply(&[Event::Observe(StoredClaim { claim: c, recorded_at: 1 })], &scopes(), 100);
+        let (alias, canonical) = edge(("p", "a"), ("p", "b"));
+        e.apply(&[merge(("p", "a"), ("p", "b"))], &scopes(), 100);
         assert!(e.views().urgent.get("default").unwrap().is_empty());
         assert!(e.views().unclassified.is_empty());
         // but the alias took effect
-        assert_eq!(e.views().aliases.resolve(&("p".into(), "a".into())), ("p".into(), "b".into()));
+        assert_eq!(e.views().aliases.resolve(&alias), canonical);
 
         // INV-8 covers `kinds` too: a reserved claim cannot be judged into a view.
-        e.apply(&[Event::Judge { claim_key: "clog:merge:p:a->p:b".into(), kind: "risk".into(), confidence: 1.0, source: JudgeSource::Rule }], &scopes(), 101);
+        let key = crate::engine::merge_key(&alias, &canonical);
+        e.apply(&[Event::Judge { claim_key: key, kind: "risk".into(), confidence: 1.0, source: JudgeSource::Rule }], &scopes(), 101);
         assert!(e.views().kinds.is_empty());
         assert!(e.views().open_loops.is_empty());
     }
 
-    /// A merge claim carrying the edge `{alias} -> {canonical}`.
+    /// The `(alias, canonical)` entity-key pair a test names as two tuples.
+    fn edge(alias: (&str, &str), canonical: (&str, &str)) -> (EntityKey, EntityKey) {
+        ((alias.0.into(), alias.1.into()), (canonical.0.into(), canonical.1.into()))
+    }
+
+    /// A merge claim carrying the edge `{alias} -> {canonical}`, built through
+    /// the shared wire format so these tests cannot drift from the writer.
     fn merge(alias: (&str, &str), canonical: (&str, &str)) -> Event {
+        let (alias, canonical) = edge(alias, canonical);
         let mut m = tests_base_claim();
-        m.claim_key = format!("clog:merge:{}:{}->{}:{}", alias.0, alias.1, canonical.0, canonical.1);
+        m.claim_key = crate::engine::merge_key(&alias, &canonical);
         m.observer = ObserverId::from("clog");
-        m.body = [alias.0, alias.1, canonical.0, canonical.1].join("\u{1f}");
+        m.body = crate::engine::merge_body(&alias, &canonical);
         Event::Observe(StoredClaim { claim: m, recorded_at: 1 })
     }
 
@@ -639,19 +640,16 @@ mod tests {
         c.entities = vec![EntityRef { etype: "p".into(), id: "a".into(), name: Some("Aye".into()) }];
         e.apply(&[Event::Observe(StoredClaim { claim: c, recorded_at: 1 })], &scopes(), 100);
 
-        let mut m = tests_base_claim();
-        m.claim_key = "clog:merge:p:a->p:b".into();
-        m.observer = ObserverId::from("clog");
-        m.body = ["p", "a", "p", "b"].join("\u{1f}");
-        e.apply(&[Event::Observe(StoredClaim { claim: m, recorded_at: 2 })], &scopes(), 101);
+        let (alias, canonical) = edge(("p", "a"), ("p", "b"));
+        e.apply(&[merge(("p", "a"), ("p", "b"))], &scopes(), 101);
         // grouped under canonical b now
         assert!(e.views().by_entity.get(&("p".into(), "b".into())).unwrap().contains("about-a"));
         assert!(e.views().by_entity.get(&("p".into(), "a".into())).is_none());
 
-        e.apply(&[Event::Retract { claim_key: "clog:merge:p:a->p:b".into() }], &scopes(), 102);
+        e.apply(&[Event::Retract { claim_key: crate::engine::merge_key(&alias, &canonical) }], &scopes(), 102);
         // un-merged: re-keyed back under a, name registry intact
         assert!(e.views().by_entity.get(&("p".into(), "a".into())).unwrap().contains("about-a"));
-        let es = entity_state(e.views());
+        let es = entity_state(e.views(), Some(ENTITY_STATE_ROWS));
         let (_, display, rows) = es.iter().find(|(k, _, _)| k == &("p".to_string(), "a".to_string())).unwrap();
         assert_eq!(display, "Aye");
         assert_eq!(rows.len(), 0); // no subject_key -> no believed rows
@@ -730,7 +728,7 @@ mod tests {
             evs.push(Event::Observe(StoredClaim { claim: c, recorded_at: 1 }));
         }
         e.apply(&evs, &scopes(), 1000);
-        let es = entity_state(e.views());
+        let es = entity_state(e.views(), Some(ENTITY_STATE_ROWS));
         let (_, display, rows) = &es[0];
         assert_eq!(display, "proj:h");
         assert_eq!(rows.len(), 8);
@@ -751,7 +749,7 @@ mod tests {
         new.entities = vec![ent("a")];
         e.apply(&[Event::Observe(StoredClaim { claim: old, recorded_at: 1 }),
                   Event::Observe(StoredClaim { claim: new, recorded_at: 2 })], &scopes(), 1000);
-        let es = entity_state(e.views());
+        let es = entity_state(e.views(), Some(ENTITY_STATE_ROWS));
         assert_eq!(es.len(), 1);
         assert_eq!(es[0].0, ("p".to_string(), "a".to_string()));
         // one row per subject: the believed claim, not the losing one
@@ -759,7 +757,7 @@ mod tests {
                    vec![("s1", "new")]);
 
         e.apply(&[merge(("p", "a"), ("p", "b"))], &scopes(), 1001);
-        let es = entity_state(e.views());
+        let es = entity_state(e.views(), Some(ENTITY_STATE_ROWS));
         assert_eq!(es.len(), 1);
         assert_eq!(es[0].0, ("p".to_string(), "b".to_string()));
         assert_eq!(es[0].1, "p:b");

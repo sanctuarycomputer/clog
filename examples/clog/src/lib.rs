@@ -249,9 +249,10 @@ impl Clog {
     ///
     /// # Errors
     ///
-    /// - `ClogError::AliasCycle` if the merge would close a loop — including
-    ///   merging an entity onto itself, or reversing an existing merge
-    ///   without retracting it first. Nothing is written in that case;
+    /// - `ClogError::AliasCycle` if the merge would close a loop: merging an
+    ///   entity onto itself (whether or not it is already merged elsewhere),
+    ///   or reversing an existing merge without retracting it first. Nothing
+    ///   is written in that case;
     /// - `ClogError::InvalidClaim` if either entity ref breaks spec §10 (an
     ///   empty or over-long `etype`/`id`, or a control character in one);
     /// - `ClogError::Storage` / `ClogError::Corrupt` if the log append
@@ -270,16 +271,29 @@ impl Clog {
     ///
     /// Each view brings its own order — `Live`, `OpenLoops` and
     /// `Unclassified` by `claim_key` ascending, `Urgent` by descending rank
-    /// within the named scope, `EntityState` by (canonical entity, subject).
-    /// `EntityState` reports only *believed* claims and reports one per
-    /// (entity, subject), so a claim about several entities appears once for
-    /// each. Reserved `clog:*` claims never appear in any view (INV-8).
+    /// within the named scope, `EntityState` by (canonical entity, subject)
+    /// ascending. `EntityState` reports only *believed* claims, and reports
+    /// **every** believed subject of every entity: the 8-row cap in a
+    /// rendered document is a rendering budget, not a limit on this API, so
+    /// `limit` is the only cap here. A claim believed under several entities
+    /// is reported once, at its lowest-ordered entity. Reserved `clog:*`
+    /// claims never appear in any view (INV-8).
     ///
-    /// Every filter is optional and they are AND-composed; `kinds` and
-    /// `entities` match any of their values. Entity filters resolve through
-    /// the merge map, so filtering on either half of a merged pair finds the
-    /// same rows. `occurred_after` is strict. `limit` defaults to 50 and is
-    /// capped at 500.
+    /// Every filter is optional and they are AND-composed. In detail:
+    ///
+    /// - `kinds` — matches any of the named kinds. An unclassified claim
+    ///   matches no `kinds` filter.
+    /// - `entities` — matches a claim mentioning any of the named entities,
+    ///   resolved through the merge map on both sides, so filtering on
+    ///   either half of a merged pair finds the same rows. `Some(vec![])`
+    ///   names no entity and so matches nothing.
+    /// - `observer` — exact match.
+    /// - `subject_prefix` — `starts_with` on `subject_key`. A claim with no
+    ///   subject matches no `subject_prefix` filter, not even `""`.
+    /// - `occurred_after` — strictly greater than.
+    /// - `min_score` — inclusive (`score >= min_score`), `View::Urgent` only.
+    /// - `limit` — defaults to 50 and is clamped to 500; `Some(0)` returns
+    ///   no rows.
     ///
     /// ```no_run
     /// # use clog::*;

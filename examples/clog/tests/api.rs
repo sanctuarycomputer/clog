@@ -411,11 +411,31 @@ fn select_filters_and_compose_and_limit_is_bounded() {
     let f = Filter { occurred_after: Some(900_000), ..Filter::default() };
     assert!(c.select(View::Live, f).unwrap().is_empty());
 
-    // limit: honoured, and clamped rather than rejected
+    // an empty entity list names no entity, so it matches nothing
+    let f = Filter { entities: Some(vec![]), ..Filter::default() };
+    assert!(c.select(View::Live, f).unwrap().is_empty());
+
+    // limit: honoured, clamped rather than rejected, and zero means zero
     let f = Filter { limit: Some(2), ..Filter::default() };
     assert_eq!(c.select(View::Live, f).unwrap().len(), 2);
     let f = Filter { limit: Some(100_000), ..Filter::default() };
     assert_eq!(c.select(View::Live, f).unwrap().len(), 6);
+    let f = Filter { limit: Some(0), ..Filter::default() };
+    assert!(c.select(View::Live, f).unwrap().is_empty());
+
+    // View::OpenLoops: the five "overdue" claims classified risk (a loop
+    // kind), in claim_key order, each carrying its label; "no-kind" is not
+    // a loop and does not appear.
+    let loops = c.select(View::OpenLoops, Filter::default()).unwrap();
+    assert_eq!(
+        loops.iter().map(|r| r.claim.claim_key.as_str()).collect::<Vec<_>>(),
+        vec!["hit", "no-subject", "too-old", "wrong-observer", "wrong-subject"]
+    );
+    assert!(loops.iter().all(|r| r.kind.as_ref().is_some_and(|k| k.kind == "risk")));
+    assert!(loops.iter().all(|r| r.score.is_none()), "only Urgent ranks");
+    // and the same filters compose over it
+    let f = Filter { observer: Some(ObserverId::from("twist")), ..Filter::default() };
+    assert_eq!(c.select(View::OpenLoops, f).unwrap().len(), 1);
 
     assert!(matches!(c.select(View::Urgent { scope: "nope".into() }, Filter::default()), Err(ClogError::UnknownScope)));
 }
@@ -479,7 +499,78 @@ fn merge_self_is_a_cycle_and_re_merging_is_a_no_op() {
     assert!(matches!(c.merge_entities(&a, &a), Err(ClogError::AliasCycle)));
     let first = c.merge_entities(&a, &b).unwrap();
     assert_eq!(c.merge_entities(&a, &b).unwrap().rev, first.rev, "identical merge must not commit");
+    // A self-merge of an *already aliased* entity is still a cycle: the
+    // flattened target of `a` is now `b`, so only an identity check catches
+    // it, and it must not mint an inert `a -> a` claim.
+    assert!(matches!(c.merge_entities(&a, &a), Err(ClogError::AliasCycle)));
+    assert_eq!(c.select(View::Live, Filter::default()).unwrap().len(), 0);
+    assert!(matches!(c.retract("clog:merge:p:a->p:a"), Err(ClogError::UnknownClaim)));
     // §10 still applies to the entity refs a merge names
     let bad = EntityRef { etype: "p".into(), id: String::new(), name: None };
     assert!(matches!(c.merge_entities(&bad, &b), Err(ClogError::InvalidClaim { .. })));
+}
+
+// The 8-row cap in §5.3 is scoped "for rendering": the rendered entities
+// slot summarizes, but a structured read must enumerate everything believed
+// about an entity, or a caller has no way to tell it saw a truncated world.
+#[test]
+fn entity_state_select_is_uncapped_while_the_rendered_slot_still_summarizes() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = Clog::open(cfg(dir.path())).unwrap();
+    c.advance(1_000_000).unwrap();
+    let entity = EntityRef { etype: "proj".into(), id: "h".into(), name: Some("Halcyon".into()) };
+    // Ten subjects, one believed claim each, all on the same entity.
+    let batch: Vec<Claim> = (0..10)
+        .map(|i| {
+            let mut cl = claim(&format!("k{i:02}"), &format!("subject {i:02} update"), 100_000 + i);
+            cl.subject_key = Some(format!("s{i:02}"));
+            cl.entities = vec![entity.clone()];
+            cl
+        })
+        .collect();
+    c.observe(batch, ObserveOpts::default()).unwrap();
+
+    // select: all ten, in (entity, subject) ascending order
+    let rows = c.select(View::EntityState, Filter::default()).unwrap();
+    assert_eq!(rows.len(), 10, "select must not inherit the render cap");
+    assert_eq!(
+        rows.iter().map(|r| r.claim.subject_key.as_deref().unwrap_or("")).collect::<Vec<_>>(),
+        (0..10).map(|i| format!("s{i:02}")).collect::<Vec<_>>()
+    );
+    assert!(rows.iter().all(|r| r.believed == Some(true)));
+
+    // the rendered slot still shows the newest 8 summaries on one line
+    let text = c.situation(None, None).unwrap().text;
+    let line = text.lines().find(|l| l.starts_with("Halcyon: ")).expect("entities slot");
+    let summaries: Vec<&str> = line.trim_start_matches("Halcyon: ").split("; ").collect();
+    assert_eq!(summaries.len(), 8, "{line}");
+    assert!(summaries[0].starts_with("subject 09"), "{line}"); // newest first
+    assert!(!line.contains("subject 00") && !line.contains("subject 01"), "{line}");
+
+    // and the caller's own limit is the only cap that applies to select
+    let f = Filter { limit: Some(3), ..Filter::default() };
+    assert_eq!(c.select(View::EntityState, f).unwrap().len(), 3);
+}
+
+// A claim mentioning several entities is believed under each of them.
+// `Row` carries no entity, so repeating it would be byte-identical noise:
+// EntityState reports it once, at its lowest-ordered entity.
+#[test]
+fn entity_state_select_reports_a_multi_entity_claim_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = Clog::open(cfg(dir.path())).unwrap();
+    c.advance(1_000_000).unwrap();
+    let x = EntityRef { etype: "p".into(), id: "x".into(), name: None };
+    let y = EntityRef { etype: "p".into(), id: "y".into(), name: None };
+    let mut both = claim("both", "concerns x and y", 100_000);
+    both.subject_key = Some("s1".into());
+    both.entities = vec![x.clone(), y.clone()];
+    c.observe(vec![both], ObserveOpts::default()).unwrap();
+    // it really is indexed under both entities
+    assert_eq!(c.select(View::EntityState, Filter { entities: Some(vec![x.clone()]), ..Filter::default() }).unwrap().len(), 1);
+    assert_eq!(c.select(View::EntityState, Filter { entities: Some(vec![y.clone()]), ..Filter::default() }).unwrap().len(), 1);
+    // ...and still yields exactly one row, filtered or not
+    assert_eq!(c.select(View::EntityState, Filter::default()).unwrap().len(), 1);
+    let f = Filter { entities: Some(vec![x, y]), ..Filter::default() };
+    assert_eq!(c.select(View::EntityState, f).unwrap().len(), 1);
 }

@@ -6,6 +6,11 @@
 //! *are* the WAL's on-disk wire format (postcard), so their shapes must stay
 //! stable. `WorldViews` is not serialized in P1 (`EngineDump` is deferred to
 //! a later phase) and derives `Clone` only.
+//!
+//! The merge-claim wire format lives here too, for the same reason: it is a
+//! format with a writer (the actor, which mints merge claims) and a reader
+//! (the naive engine, which parses the alias edge back out), and a format
+//! spelled out twice is a format that can drift.
 
 use std::collections::BTreeMap;
 
@@ -16,6 +21,39 @@ use crate::alias::{AliasMap, EntityKey};
 use crate::types::{Claim, Focus, JudgeSource, KindLabel, ObserverId, Rev};
 
 pub(crate) mod naive;
+
+// ---- merge-claim wire format ----------------------------------------------
+
+/// The key prefix identifying a merge (entity alias) claim.
+pub(crate) const MERGE_PREFIX: &str = "clog:merge:";
+
+/// The field separator inside a merge claim's body (ASCII unit separator).
+///
+/// Unit-separated rather than JSON so the engine needs no parser and no extra
+/// dependency; §10 validation already rejects control characters in every
+/// entity field, so the separator cannot appear inside an entity key.
+pub(crate) const MERGE_SEP: char = '\u{1f}';
+
+/// The `claim_key` of the merge claim asserting `alias -> canonical`:
+/// `clog:merge:{alias.etype}:{alias.id}->{canonical.etype}:{canonical.id}`.
+///
+/// This key is the merge's public handle — retracting it is how a host
+/// un-merges (spec §5.2) — so it is built here and nowhere else.
+pub(crate) fn merge_key(alias: &EntityKey, canonical: &EntityKey) -> String {
+    format!("{MERGE_PREFIX}{}:{}->{}:{}", alias.0, alias.1, canonical.0, canonical.1)
+}
+
+/// The `body` of that claim: the four entity fields joined with
+/// [`MERGE_SEP`], which is the alias edge the engine parses back out.
+///
+/// ```text
+/// alias.etype ␟ alias.id ␟ canonical.etype ␟ canonical.id
+/// ```
+pub(crate) fn merge_body(alias: &EntityKey, canonical: &EntityKey) -> String {
+    [&alias.0, &alias.1, &canonical.0, &canonical.1]
+        .map(String::as_str)
+        .join(&MERGE_SEP.to_string())
+}
 
 /// A claim as stored by the engine, alongside when clog recorded it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
