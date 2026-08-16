@@ -202,9 +202,10 @@ impl Clog {
     /// per-call: clog stores none.
     ///
     /// The returned `rev` is the revision at which this scope's text last
-    /// changed, which may lag the global revision — that skew is meaningful
-    /// (spec §5.10): it says the writes in between did not affect this
-    /// scope.
+    /// *materially* changed, which may lag the global revision — that skew
+    /// is meaningful (spec §5.10): it says the writes in between did not
+    /// affect what this scope has to say. `as_of` moves with it, so an
+    /// unchanged document never carries a freshened timestamp.
     ///
     /// # Errors
     ///
@@ -214,7 +215,10 @@ impl Clog {
     ///   rejects the call only; nothing is written and no stored document
     ///   is affected.
     pub fn situation(&self, scope: Option<&str>, template: Option<&str>) -> Result<Situation, ClogError> {
-        let snapshot = self.inner.snapshot.load();
+        // `load_full` rather than `load`: parsing and rendering a custom
+        // template is unbounded caller-supplied work, and an `ArcSwap` guard
+        // must not be held across it.
+        let snapshot = self.inner.snapshot.load_full();
         let scope = scope.unwrap_or(DEFAULT_SCOPE);
         let state = snapshot.situations.get(scope).ok_or(ClogError::UnknownScope)?;
         match template {
@@ -233,10 +237,12 @@ impl Clog {
     /// nothing else advances the clock, so recency decay, `recorded_at` and
     /// every rendered `as_of` are entirely under the caller's control.
     ///
-    /// P1 emits no tick events, so advancing commits no batch and takes no
-    /// revision. It does re-score and re-publish, so the situation you read
-    /// afterwards reflects the new time — including a freshly computed
-    /// `changes` slot, which is always the delta since the previous render.
+    /// P1 emits no tick events, so advancing is pure clock movement: it
+    /// commits no batch, takes no revision, and re-renders nothing. An
+    /// immaterial clock move must leave every scope exactly as it was. The
+    /// new time reaches the views at the next committed batch, which
+    /// re-scores against it. Advancing is still ordered against in-flight
+    /// writes, so a write submitted before it always sees the earlier time.
     ///
     /// # Errors
     ///

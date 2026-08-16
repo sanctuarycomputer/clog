@@ -66,13 +66,21 @@ impl Wal {
 /// offending tail bytes are appended to `dir/wal/wal.corrupt` and the log
 /// is truncated to the last good frame boundary before replay stops (R2).
 /// Reopening afterwards is clean.
+///
+/// # Errors
+///
+/// A tail that is merely torn or corrupt is *not* an error (see above), but
+/// a structurally impossible log is: `ClogError::Corrupt` if the replayed
+/// revisions are not strictly increasing from 1. That cannot happen by
+/// truncation — only by a bug or by two writers sharing one log — so it is
+/// never silently repaired.
 pub(crate) fn open_dir(dir: &Path, fsync: FsyncPolicy) -> Result<(Wal, Vec<Batch>), ClogError> {
     let wal_dir = dir.join("wal");
     fs::create_dir_all(&wal_dir)?;
     let log_path = wal_dir.join("log");
 
     let bytes = if log_path.exists() { fs::read(&log_path)? } else { Vec::new() };
-    let (batches, good_len) = replay(&bytes);
+    let (batches, good_len) = replay(&bytes)?;
 
     if good_len < bytes.len() {
         quarantine(&wal_dir, &bytes[good_len..])?;
@@ -83,16 +91,41 @@ pub(crate) fn open_dir(dir: &Path, fsync: FsyncPolicy) -> Result<(Wal, Vec<Batch
     }
 
     let file = OpenOptions::new().create(true).append(true).open(&log_path)?;
+    sync_dir(&wal_dir);
     Ok((Wal { file, fsync }, batches))
+}
+
+/// Fsyncs the WAL directory itself, so the log file's *directory entry* is
+/// durable and not just its contents: fsyncing a freshly created file does
+/// not persist the name that points at it, and a crash could otherwise
+/// leave a log that no longer exists.
+///
+/// Best-effort by design. Opening a directory read-only and fsyncing it is
+/// the portable-enough POSIX idiom, but some filesystems reject it, and a
+/// refusal here must never fail an open that has otherwise succeeded.
+fn sync_dir(wal_dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(handle) = File::open(wal_dir) {
+        let _ = handle.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = wal_dir;
 }
 
 /// Replays length-prefixed, CRC32-checked frames from `bytes` in order,
 /// stopping at the first torn or corrupt frame. Returns the decoded
 /// batches and the byte offset one past the last good frame (`bytes.len()`
 /// if every frame replayed cleanly).
-fn replay(bytes: &[u8]) -> (Vec<Batch>, usize) {
-    let mut batches = Vec::new();
+///
+/// Revisions must be strictly increasing from 1: the writer assigns
+/// `rev + 1` per committed batch and appends under an exclusive handle, so
+/// a repeated or out-of-order rev means the log is not what it claims to be
+/// (two writers, or a bug) rather than merely truncated. That is
+/// `ClogError::Corrupt`, not a tail to quarantine.
+fn replay(bytes: &[u8]) -> Result<(Vec<Batch>, usize), ClogError> {
+    let mut batches: Vec<Batch> = Vec::new();
     let mut offset = 0usize;
+    let mut last_rev = 0u64;
 
     while offset < bytes.len() {
         if offset + HEADER_LEN > bytes.len() {
@@ -120,6 +153,12 @@ fn replay(bytes: &[u8]) -> (Vec<Batch>, usize) {
         }
         match postcard::from_bytes::<Batch>(payload) {
             Ok(batch) => {
+                if batch.rev <= last_rev {
+                    return Err(ClogError::Corrupt {
+                        detail: format!("wal rev not strictly increasing: {} after {last_rev}", batch.rev),
+                    });
+                }
+                last_rev = batch.rev;
                 batches.push(batch);
                 offset = payload_start + len;
             }
@@ -129,7 +168,7 @@ fn replay(bytes: &[u8]) -> (Vec<Batch>, usize) {
         }
     }
 
-    (batches, offset)
+    Ok((batches, offset))
 }
 
 /// Appends `tail` to `wal_dir/wal.corrupt`, creating the file if needed.
@@ -145,7 +184,7 @@ mod tests {
     use crate::engine::{Batch, Event};
 
     fn batch(rev: u64) -> Batch {
-        Batch { rev, events: vec![Event::Tick { epoch: rev }] }
+        Batch { rev, as_of: 1_000 * rev, events: vec![Event::Tick { epoch: rev }] }
     }
 
     #[test]
@@ -205,6 +244,25 @@ mod tests {
         // reopening again is clean (tail already truncated)
         let (_, replayed) = open_dir(dir.path(), crate::FsyncPolicy::OnCommit).unwrap();
         assert_eq!(replayed.len(), 1);
+    }
+
+    #[test]
+    fn non_increasing_rev_is_corrupt_not_a_torn_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let (mut w, _) = open_dir(dir.path(), crate::FsyncPolicy::OnCommit).unwrap();
+            w.append(&batch(1)).unwrap();
+            w.append(&batch(1)).unwrap(); // same rev twice: impossible for one writer
+        }
+        assert!(matches!(open_dir(dir.path(), crate::FsyncPolicy::OnCommit), Err(ClogError::Corrupt { .. })));
+
+        // rev 0 is likewise impossible: the first committed batch is rev 1.
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let (mut w, _) = open_dir(dir.path(), crate::FsyncPolicy::OnCommit).unwrap();
+            w.append(&batch(0)).unwrap();
+        }
+        assert!(matches!(open_dir(dir.path(), crate::FsyncPolicy::OnCommit), Err(ClogError::Corrupt { .. })));
     }
 
     #[test]

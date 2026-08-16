@@ -28,10 +28,11 @@ fn claim(key: &str, body: &str, occ: u64) -> Claim {
 }
 
 /// Normalizes a situation's text for equality comparisons that are about
-/// *world state*, not about counters or the render-diff log.
+/// *world state*, not about counters, clocks or the render-diff log.
 ///
 /// Two things are stripped:
-/// 1. the `rev {n}` marker in the header — INV-3 is about content, not revs;
+/// 1. the entire header line — it carries the rev and the `as_of`
+///    timestamp, both of which are bookkeeping rather than content;
 /// 2. the whole `## changes since last brief` section (the default
 ///    template's last slot) — the controller's INV-3 ruling: the spec
 ///    self-conflicts, since INV-3 demands post-retraction text identical to
@@ -39,11 +40,11 @@ fn claim(key: &str, body: &str, occ: u64) -> Claim {
 ///    between the last two rendered revs, so a retraction legitimately
 ///    echoes there exactly once. INV-3 text equality excludes that slot.
 fn norm(s: &Situation) -> String {
-    let mut t = s.text.replace(&format!("rev {}", s.rev), "rev _");
-    if let Some(i) = t.find("\n## changes since last brief\n") {
-        t.truncate(i);
+    let body = s.text.split_once('\n').map_or("", |(_, rest)| rest);
+    match body.find("\n## changes since last brief\n") {
+        Some(i) => body[..i].to_string(),
+        None => body.to_string(),
     }
-    t
 }
 
 /// The handle is a cheap-clone, thread-safe port (spec §6.1).
@@ -122,6 +123,29 @@ fn inv9_rev_survives_reopen() {
     assert!(s.text.contains('x') && s.text.contains('z'));
 }
 
+// Beyond the brief: INV-9 above checks the rev survives a reopen; the
+// document has to survive it too, byte for byte, which is why each batch
+// carries the clock reading it was committed at.
+#[test]
+fn reopen_reproduces_situation_text_byte_identically() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = {
+        let c = Clog::open(cfg(dir.path())).unwrap();
+        c.advance(1_000_000).unwrap();
+        c.observe(vec![claim("a", "first", 500_000)], ObserveOpts::default()).unwrap();
+        // a different clock reading for the second batch: replaying both
+        // against one reopen-time reading would render a different header
+        c.advance(500_000).unwrap();
+        c.observe(vec![claim("b", "second", 900_000)], ObserveOpts::default()).unwrap();
+        c.situation(None, None).unwrap()
+    };
+    let c = Clog::open(cfg(dir.path())).unwrap();
+    let after = c.situation(None, None).unwrap();
+    assert_eq!(after.text, before.text);
+    assert_eq!(after.rev, before.rev);
+    assert_eq!(after.as_of, before.as_of);
+}
+
 #[test]
 fn reserved_namespace_rejected_and_batch_atomic() {
     let dir = tempfile::tempdir().unwrap();
@@ -152,6 +176,34 @@ fn rules_tier_classifies_at_commit() {
     assert!(s.text.contains("- RISK invoice 1042"), "open loops slot should show it:\n{}", s.text);
 }
 
+// Beyond the brief: a batch may carry two versions of one key. Only the
+// version that survives the batch may be classified — judging every observed
+// version would durably label the survivor with a superseded version's kind.
+#[test]
+fn only_the_surviving_version_of_a_key_is_classified() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = cfg(dir.path());
+    for kd in &mut config.kinds.kinds {
+        if kd.name == "risk" {
+            kd.rules.push(clog::Rule { any_of: vec![clog::Matcher::BodyContains("overdue".into())] });
+        }
+    }
+    let c = Clog::open(config).unwrap();
+    c.advance(1_000_000).unwrap();
+    // one batch, two versions of "inv": only the first matches the risk rule
+    c.observe(
+        vec![claim("inv", "invoice 1042 is overdue", 500_000), claim("inv", "invoice 1042 is paid", 600_000)],
+        ObserveOpts::default(),
+    )
+    .unwrap();
+
+    let s = c.situation(None, None).unwrap();
+    assert!(s.text.contains("invoice 1042 is paid"), "{}", s.text);
+    // the survivor never matched the rule, so it is unclassified: no open loop
+    assert!(!s.text.contains("RISK"), "surviving claim must not inherit the superseded version's kind:\n{}", s.text);
+    assert!(s.text.contains("## open loops\n(none)"), "{}", s.text);
+}
+
 #[test]
 fn custom_template_and_errors() {
     let dir = tempfile::tempdir().unwrap();
@@ -162,6 +214,45 @@ fn custom_template_and_errors() {
     assert!(s.text.starts_with("URGENT ONLY\n1."), "{}", s.text);
     assert!(matches!(c.situation(None, Some("%{bogus}")), Err(ClogError::TemplateError(_))));
     assert!(matches!(c.situation(Some("nope"), None), Err(ClogError::UnknownScope)));
+}
+
+// Beyond the brief: a change confined to items the template's `limit=` hides
+// is invisible in the document but must still refresh what a custom-template
+// read assembles from — and must not move the scope's rev (spec §5.10).
+#[test]
+fn hidden_item_change_keeps_the_document_but_refreshes_its_inputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = Clog::open(cfg(dir.path())).unwrap();
+    c.advance(1_000_000).unwrap();
+    // Ten claims with identical trust and occurred_at: equal scores, so the
+    // claim_key tiebreak orders them k00..k09 and the default template's
+    // `%{urgent limit=8}` hides the last two.
+    let batch: Vec<Claim> =
+        (0..10).map(|i| claim(&format!("k{i:02}"), &format!("body {i:02}"), 500_000)).collect();
+    c.observe(batch, ObserveOpts::default()).unwrap();
+    // Rewrite one hidden item, so that this render and the next both sit on
+    // an unchanged membership and an empty `changes` slot — isolating the
+    // hidden-item edit as the only difference between them.
+    let settled = c.observe(vec![claim("k09", "rewritten tail", 500_000)], ObserveOpts::default()).unwrap();
+    let before = c.situation(None, None).unwrap();
+    assert!(before.text.contains("… (2 more)"), "{}", before.text);
+
+    let ack = c.observe(vec![claim("k08", "second rewrite", 500_000)], ObserveOpts::default()).unwrap();
+    assert_eq!(ack.rev, settled.rev + 1, "the upsert did commit a batch");
+
+    let after = c.situation(None, None).unwrap();
+    assert_eq!(after.text, before.text, "a hidden item's body never reaches the document");
+    assert_eq!(after.rev, before.rev, "unchanged text must keep its rev (rev skew is the signal)");
+    assert_eq!(after.as_of, before.as_of, "and its as_of: nothing material changed");
+    assert!(after.rev < ack.rev, "the scope's rev now lags the global rev, as it should");
+
+    // The stored slot inputs did move, though: lift the cap and both new
+    // bodies are there, under the same rev the default document reports.
+    let wide = c.situation(None, Some("%{header}\n%{urgent limit=10}")).unwrap();
+    assert!(wide.text.contains("rewritten tail"), "{}", wide.text);
+    assert!(wide.text.contains("second rewrite"), "{}", wide.text);
+    assert!(!wide.text.contains("body 08") && !wide.text.contains("body 09"), "{}", wide.text);
+    assert!(wide.text.starts_with(&format!("default · rev {}", after.rev)), "{}", wide.text);
 }
 
 // Beyond the brief: nothing above renders the `entities` slot, and it is the

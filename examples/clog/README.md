@@ -40,9 +40,13 @@ Still to land in P1: `select`, `revoke_observer`, `merge_entities`.
 - **WAL append (and fsync) always precedes engine apply.** A crash can lose
   the tail of the log; it can never leave the engine ahead of it.
 - The WAL records *effects*, not intentions: a batch carries the caller's
-  events plus the classifier's derived `Judge` events, exactly as applied.
-  Replay is pure event application — the classifier never runs on replay — so
-  the same log bytes always rebuild the same world.
+  events plus the classifier's derived `Judge` events, exactly as applied,
+  plus the clock reading it was committed at. Replay is pure event
+  application — the classifier never runs on replay — so the same log bytes
+  always rebuild the same world, down to byte-identical situation text.
+- A scope's `rev` and `as_of` move only when its text *materially* changes;
+  the rev skew against the global rev is the signal that the writes in
+  between did not affect that scope.
 - After each batch the writer publishes an immutable `WorldSnapshot` through
   `ArcSwap`. Reads never touch the writer.
 - Dropping the last `Clog` handle shuts the writer down: it finishes the

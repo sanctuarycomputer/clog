@@ -72,6 +72,14 @@ pub(crate) enum Event {
 pub(crate) struct Batch {
     /// The revision this batch was committed at.
     pub rev: Rev,
+    /// The clock reading (epoch millis) the batch was committed at.
+    ///
+    /// Persisted because rendering is time-sensitive: recency decay and the
+    /// header's `as_of` both read the clock, so replaying a batch against
+    /// the *reopen* time would rebuild a different document from the same
+    /// events. With the reading in the record, replay re-renders every
+    /// batch byte-identically to the original commit (INV-9, INV-10).
+    pub as_of: u64,
     /// The events applied in this batch, in order.
     pub events: Vec<Event>,
 }
@@ -149,6 +157,7 @@ mod tests {
     fn batch_round_trips_postcard() {
         let b = Batch {
             rev: 3,
+            as_of: 1_700_000_000_000,
             events: vec![
                 Event::Observe(StoredClaim { claim: tests_base_claim(), recorded_at: 9 }),
                 Event::Retract { claim_key: "k1".into() },
@@ -159,6 +168,7 @@ mod tests {
         let bytes = postcard::to_allocvec(&b).unwrap();
         let b2: Batch = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(b2.rev, 3);
+        assert_eq!(b2.as_of, 1_700_000_000_000);
         assert_eq!(b2.events.len(), 4);
     }
 }

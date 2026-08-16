@@ -31,6 +31,7 @@ use crate::engine::naive::{NaiveCfg, NaiveEngine, entity_state};
 use crate::engine::{Batch, Engine, Event, StoredClaim, WorldViews};
 use crate::kinds::{self, RuleSet};
 use crate::render::template::{DEFAULT_TEMPLATE, Template, parse};
+use crate::render::time::rfc3339_utc;
 use crate::render::{ChangeItem, EntityItem, LoopItem, SlotInputs, UrgentItem, headline, render};
 use crate::types::{Ack, Claim, ClogError, Config, Focus, ObserveOpts, Rev, Situation};
 use crate::validate::{validate_claim, validate_focus};
@@ -82,11 +83,16 @@ pub(crate) enum WriteOp {
 /// document itself so a custom-template read is pure string assembly (INV-1:
 /// reads never compute views).
 ///
-/// `membership` is the `urgent ∪ open_loops` key set **as of the last
-/// render**, mapped to the headline each key had then. It is what the
-/// `changes` slot diffs against; the headlines are stored (rather than
-/// looked up later) because a removed claim is, by definition, no longer
-/// live to look up.
+/// `inputs` and `membership` are refreshed on **every** render, even when
+/// the rendered text is retained unchanged: a change confined to items the
+/// default template's `limit=` caps hide is invisible in `text` but must
+/// still reach a custom-template read and the next `changes` diff. Only
+/// `situation` (text, rev, as_of) is held back when nothing material moved.
+///
+/// `membership` is the `urgent ∪ open_loops` key set as of the last render,
+/// mapped to the headline each key had then. It is what the `changes` slot
+/// diffs against; the headlines are stored (rather than looked up later)
+/// because a removed claim is, by definition, no longer live to look up.
 #[derive(Clone)]
 pub(crate) struct SituationState {
     /// The rendered document.
@@ -119,8 +125,10 @@ pub(crate) struct WorldSnapshot {
     // Read by `set_focus`/`select` (Tasks 15+).
     #[allow(dead_code)]
     pub scopes: BTreeMap<String, Focus>,
-    /// The rendered document per scope.
-    pub situations: BTreeMap<String, SituationState>,
+    /// The rendered document per scope. Behind `Arc` so publishing a
+    /// snapshot copies one pointer per scope rather than deep-cloning every
+    /// document and its slot inputs.
+    pub situations: BTreeMap<String, Arc<SituationState>>,
 }
 
 // ---- crash injection ------------------------------------------------------
@@ -257,7 +265,7 @@ struct Writer {
     budget_chars: usize,
     scopes: BTreeMap<String, Focus>,
     rev: Rev,
-    situations: BTreeMap<String, SituationState>,
+    situations: BTreeMap<String, Arc<SituationState>>,
     snapshot: Arc<ArcSwap<WorldSnapshot>>,
 }
 
@@ -266,20 +274,22 @@ impl Writer {
     ///
     /// The rev-0 render happens *before* replay so that a reopened instance
     /// walks exactly the same render sequence a fresh one did: empty world
-    /// at rev 0, then one render per batch. Every replay render uses a
-    /// single clock reading (P1 persists no per-batch clock), so `as_of`
-    /// values are as-of-open rather than as-of-original-commit; the rendered
-    /// content and the global rev are reproduced exactly.
+    /// at rev 0, then one render per batch. Each replayed batch re-renders
+    /// against **its own** recorded clock reading (`Batch.as_of`), not the
+    /// reopen time, so scores, headers and therefore every scope's text and
+    /// rev come back byte-identical to the original commit (INV-9, INV-10).
     fn rebuild(&mut self, batches: &[Batch]) {
         let now = self.clock.now_ms();
         self.engine.apply(&[], &self.scopes, now);
         self.render_all(now);
+        let mut as_of = now;
         for batch in batches {
             self.rev = batch.rev;
-            self.engine.apply(&batch.events, &self.scopes, now);
-            self.render_all(now);
+            as_of = batch.as_of;
+            self.engine.apply(&batch.events, &self.scopes, as_of);
+            self.render_all(as_of);
         }
-        self.publish(now);
+        self.publish(as_of);
     }
 
     /// Dispatches one write command.
@@ -335,9 +345,13 @@ impl Writer {
     /// of a claim, so a re-send with a later arrival time is still a
     /// duplicate.
     ///
-    /// The rules tier then classifies everything the batch actually
-    /// observes and appends the resulting `Judge` events *after* all claim
-    /// events, so a judgment never precedes the claim it judges.
+    /// The rules tier then classifies the **surviving** version of each key
+    /// — the one still live when the batch finishes — and appends the
+    /// resulting `Judge` events after all claim events, so a judgment never
+    /// precedes the claim it judges and never describes a version the batch
+    /// already superseded. Judging every `Observe` would durably mislabel
+    /// the survivor whenever a batch carries two versions of one key and
+    /// only the earlier one matched a rule.
     fn expand(&self, claims: &[Claim], now: u64) -> Vec<Event> {
         let mut events = Vec::new();
         // What each key holds so far *within this batch*, so a batch that
@@ -358,13 +372,16 @@ impl Writer {
             pending.insert(claim.claim_key.as_str(), claim);
         }
 
-        let judgments: Vec<Event> = events
-            .iter()
-            .filter_map(|event| {
-                let Event::Observe(stored) = event else { return None };
-                let label = kinds::classify(&self.rules, &stored.claim)?;
+        // `pending` holds exactly the survivors: one entry per key the batch
+        // observes, carrying the last version of it. Iteration is
+        // `claim_key` order, so the event list is caller-order-independent
+        // and replay-deterministic (INV-11).
+        let judgments: Vec<Event> = pending
+            .values()
+            .filter_map(|claim| {
+                let label = kinds::classify(&self.rules, claim)?;
                 Some(Event::Judge {
-                    claim_key: stored.claim.claim_key.clone(),
+                    claim_key: claim.claim_key.clone(),
                     kind: label.kind,
                     confidence: label.confidence,
                     source: label.source,
@@ -387,8 +404,9 @@ impl Writer {
         }
         // 6. WAL first, engine second — always (§6.3, R1). `rev` advances
         //    only once the record is durable, so a failed append leaves the
-        //    world exactly where it was.
-        let batch = Batch { rev: self.rev + 1, events };
+        //    world exactly where it was. The clock reading rides along in
+        //    the record so replay can reproduce this batch's render.
+        let batch = Batch { rev: self.rev + 1, as_of: now, events };
         self.wal.append(&batch)?;
         #[cfg(feature = "test-crash")]
         maybe_crash_after_wal(batch.rev);
@@ -401,19 +419,17 @@ impl Writer {
         Ok(self.ack(want))
     }
 
-    /// Moves the manual clock (spec §5.5 without the tick driver).
+    /// Moves the manual clock, and nothing else (spec §5.5 without the tick
+    /// driver).
     ///
-    /// P1 emits no `Tick` events, so this commits no batch and takes no rev
-    /// — an immaterial clock move must never bump a rev (INV-5, B4). It
-    /// does re-score and re-render: the clock is a material input to both
-    /// recency decay and the header's `as_of`, and readers only ever see
-    /// the published snapshot, so leaving it stale would report a time that
-    /// has passed.
-    fn advance(&mut self, ms: u64) {
-        let now = self.clock.advance(ms);
-        self.engine.apply(&[], &self.scopes, now);
-        self.render_all(now);
-        self.publish(now);
+    /// P1 emits no `Tick` events, so this commits no batch, takes no rev,
+    /// re-scores nothing and re-renders nothing: an immaterial clock move
+    /// must leave every scope exactly as it was (INV-5, B4). Time reaches
+    /// the views at the next committed batch, which re-scores against the
+    /// new reading. It still travels through the writer's queue so that it
+    /// is ordered against in-flight writes.
+    fn advance(&self, ms: u64) {
+        self.clock.advance(ms);
     }
 
     /// Flushes the WAL on the way out (spec §6.1: clean shutdown fsyncs).
@@ -444,10 +460,17 @@ impl Writer {
         }
     }
 
-    /// Renders one scope's default-template document, replacing the stored
-    /// one **only if the text actually changed** — that is what keeps
-    /// `Situation.rev` meaning "the rev at which this scope's text last
-    /// changed" (§5.10) instead of just tracking the global rev.
+    /// Renders one scope's default-template document.
+    ///
+    /// The slot inputs and the membership map are always replaced — they are
+    /// what custom-template reads assemble from and what the next `changes`
+    /// diff measures against, and both must track the views even when the
+    /// document does not. Only the `Situation` itself (text, rev, as_of) is
+    /// held back, and only when nothing *material* moved: the comparison
+    /// masks the header's rev and timestamp, so a document that says the
+    /// same thing keeps the rev and as_of at which it last actually changed
+    /// (§5.10 — rev skew between a scope and the global rev is the signal
+    /// that the writes in between did not touch that scope).
     fn render_scope(&mut self, scope: &str, now: u64) {
         let mut inputs = slot_inputs(self.engine.views(), scope, self.rev, now);
         let membership: OrdMap<String, String> = inputs
@@ -460,18 +483,25 @@ impl Writer {
         let previous = self.situations.get(scope);
         inputs.changes = changes_since(previous.map(|s| &s.membership), &membership);
         let text = render(&self.template, &inputs, self.budget_chars);
-        if previous.is_some_and(|s| s.situation.text == text) {
-            return;
-        }
 
-        self.situations.insert(
-            scope.to_string(),
-            SituationState {
-                situation: Situation { scope: scope.to_string(), text, rev: self.rev, as_of: now },
-                inputs,
-                membership,
-            },
-        );
+        // Unchanged in substance? Then keep the whole previous document,
+        // header included — a fresh timestamp on identical content would
+        // claim a change that did not happen.
+        let retained = previous
+            .filter(|s| {
+                mask_header(&s.situation.text, s.situation.rev, s.situation.as_of)
+                    == mask_header(&text, self.rev, now)
+            })
+            .map(|s| s.situation.clone());
+        let situation = retained.unwrap_or(Situation { scope: scope.to_string(), text, rev: self.rev, as_of: now });
+
+        // Keep the stored inputs' header fields in step with the document
+        // they belong to, so a custom `%{header}` agrees with `Situation.rev`.
+        inputs.rev = situation.rev;
+        inputs.as_of_ms = situation.as_of;
+
+        self.situations
+            .insert(scope.to_string(), Arc::new(SituationState { situation, inputs, membership }));
     }
 
     /// Write-path step 8: publish the new snapshot. This is the moment the
@@ -489,6 +519,17 @@ impl Writer {
 }
 
 // ---- slot assembly --------------------------------------------------------
+
+/// Blanks the rev and timestamp the `header` slot renders, so two documents
+/// can be compared for *material* difference (§5.10).
+///
+/// The header slot is `{scope} · rev {rev} · {as_of RFC3339}` (§5.8), and
+/// the default template opens with it, so replacing the first occurrence of
+/// the `rev {n} · {ts}` pair blanks exactly the header and nothing else —
+/// a claim body that happened to contain the same bytes sits after it.
+fn mask_header(text: &str, rev: Rev, as_of: u64) -> String {
+    text.replacen(&format!("rev {rev} · {}", rfc3339_utc(as_of)), "rev _ · _", 1)
+}
 
 /// Builds one scope's slot inputs from the materialized views (§5.7, §5.8).
 ///
