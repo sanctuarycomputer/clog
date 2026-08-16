@@ -29,15 +29,15 @@ use imbl::OrdMap;
 use crate::alias::EntityKey;
 use crate::clock::Clock;
 use crate::engine::naive::{ENTITY_STATE_ROWS, NaiveCfg, NaiveEngine, entity_state, is_reserved};
-use crate::engine::{merge_body, merge_key};
 use crate::engine::{Batch, Engine, Event, StoredClaim, WorldViews};
+use crate::engine::{merge_body, merge_key};
 use crate::kinds::{self, RuleSet};
 use crate::render::template::{DEFAULT_TEMPLATE, Template, parse};
 use crate::render::time::rfc3339_utc;
 use crate::render::{ChangeItem, EntityItem, LoopItem, SlotInputs, UrgentItem, headline, render};
 use crate::types::{
-    Ack, Claim, ClogError, Config, Credibility, EntityRef, Filter, Focus, ObserveOpts, ObserverId, Reliability, Rev,
-    Row, Situation, View,
+    Ack, Claim, ClogError, Config, Credibility, EntityRef, Filter, Focus, ObserveOpts, ObserverId,
+    Reliability, Rev, Row, Situation, View,
 };
 use crate::validate::{validate_claim, validate_focus};
 use crate::wal::{self, Wal};
@@ -239,7 +239,13 @@ pub(crate) fn spawn(cfg: Config) -> Result<Spawned, ClogError> {
         .name("clog-writer".to_string())
         .spawn(move || run(writer, rx))?;
 
-    Ok(Spawned { tx, snapshot, join, clock, budget_chars: cfg.budget_chars })
+    Ok(Spawned {
+        tx,
+        snapshot,
+        join,
+        clock,
+        budget_chars: cfg.budget_chars,
+    })
 }
 
 /// The configured scopes with `"default"` injected if the host did not
@@ -247,7 +253,9 @@ pub(crate) fn spawn(cfg: Config) -> Result<Spawned, ClogError> {
 /// taxonomy (§10) before the instance is allowed to open.
 fn resolve_scopes(cfg: &Config) -> Result<BTreeMap<String, Focus>, ClogError> {
     let mut scopes = cfg.scopes.clone();
-    scopes.entry(DEFAULT_SCOPE.to_string()).or_insert_with(Focus::uniform);
+    scopes
+        .entry(DEFAULT_SCOPE.to_string())
+        .or_insert_with(Focus::uniform);
     for focus in scopes.values() {
         validate_focus(focus, &cfg.kinds)?;
     }
@@ -397,7 +405,11 @@ impl Writer {
     /// `observed_at` are the writer's clock reading, so a re-merge under a
     /// moving (`System`) clock does supersede the live claim and take a rev;
     /// the alias map it rebuilds from is unchanged either way.
-    fn merge_entities(&mut self, alias: &EntityRef, canonical: &EntityRef) -> Result<Ack, ClogError> {
+    fn merge_entities(
+        &mut self,
+        alias: &EntityRef,
+        canonical: &EntityRef,
+    ) -> Result<Ack, ClogError> {
         let (alias_key, canonical_key) = (alias.key(), canonical.key());
         // A self-merge is a cycle whatever the alias map says, and it has to
         // be caught *before* flattening: once `a` is aliased to `b`,
@@ -433,14 +445,27 @@ impl Writer {
         // The same upsert expansion `observe` uses, minus the rules tier: a
         // reserved claim is never classified (INV-8), so running the
         // classifier could only ever write a `Judge` the engine discards.
-        let live = self.engine.views().claims.get(&claim.claim_key).map(|sc| &sc.claim);
+        let live = self
+            .engine
+            .views()
+            .claims
+            .get(&claim.claim_key)
+            .map(|sc| &sc.claim);
         let events = match live {
             Some(old) if *old == claim => Vec::new(),
             Some(_) => vec![
-                Event::Retract { claim_key: claim.claim_key.clone() },
-                Event::Observe(StoredClaim { claim, recorded_at: now }),
+                Event::Retract {
+                    claim_key: claim.claim_key.clone(),
+                },
+                Event::Observe(StoredClaim {
+                    claim,
+                    recorded_at: now,
+                }),
             ],
-            None => vec![Event::Observe(StoredClaim { claim, recorded_at: now })],
+            None => vec![Event::Observe(StoredClaim {
+                claim,
+                recorded_at: now,
+            })],
         };
         self.commit(events, None, now)
     }
@@ -469,16 +494,24 @@ impl Writer {
         let mut pending: BTreeMap<&str, &Claim> = BTreeMap::new();
 
         for claim in claims {
-            let live = pending
-                .get(claim.claim_key.as_str())
-                .copied()
-                .or_else(|| self.engine.views().claims.get(&claim.claim_key).map(|sc| &sc.claim));
+            let live = pending.get(claim.claim_key.as_str()).copied().or_else(|| {
+                self.engine
+                    .views()
+                    .claims
+                    .get(&claim.claim_key)
+                    .map(|sc| &sc.claim)
+            });
             match live {
                 Some(old) if old == claim => continue,
-                Some(_) => events.push(Event::Retract { claim_key: claim.claim_key.clone() }),
+                Some(_) => events.push(Event::Retract {
+                    claim_key: claim.claim_key.clone(),
+                }),
                 None => {}
             }
-            events.push(Event::Observe(StoredClaim { claim: claim.clone(), recorded_at: now }));
+            events.push(Event::Observe(StoredClaim {
+                claim: claim.clone(),
+                recorded_at: now,
+            }));
             pending.insert(claim.claim_key.as_str(), claim);
         }
 
@@ -507,7 +540,12 @@ impl Writer {
     /// An empty event list is *not* a batch: it takes no rev, writes no WAL
     /// record and re-renders nothing, so a wholly duplicate `observe` is
     /// invisible to every reader (INV-5).
-    fn commit(&mut self, events: Vec<Event>, want: Option<&str>, now: u64) -> Result<Ack, ClogError> {
+    fn commit(
+        &mut self,
+        events: Vec<Event>,
+        want: Option<&str>,
+        now: u64,
+    ) -> Result<Ack, ClogError> {
         // 5. Nothing to do.
         if events.is_empty() {
             return Ok(self.ack(want));
@@ -516,7 +554,11 @@ impl Writer {
         //    only once the record is durable, so a failed append leaves the
         //    world exactly where it was. The clock reading rides along in
         //    the record so replay can reproduce this batch's render.
-        let batch = Batch { rev: self.rev + 1, as_of: now, events };
+        let batch = Batch {
+            rev: self.rev + 1,
+            as_of: now,
+            events,
+        };
         self.wal.append(&batch)?;
         #[cfg(feature = "test-crash")]
         maybe_crash_after_wal(batch.rev);
@@ -553,7 +595,9 @@ impl Writer {
     fn ack(&self, want: Option<&str>) -> Ack {
         Ack {
             rev: self.rev,
-            situation: want.and_then(|scope| self.situations.get(scope)).map(|s| s.situation.clone()),
+            situation: want
+                .and_then(|scope| self.situations.get(scope))
+                .map(|s| s.situation.clone()),
         }
     }
 
@@ -587,7 +631,12 @@ impl Writer {
             .urgent
             .iter()
             .map(|u| (u.claim_key.clone(), u.headline.clone()))
-            .chain(inputs.open_loops.iter().map(|l| (l.claim_key.clone(), l.headline.clone())))
+            .chain(
+                inputs
+                    .open_loops
+                    .iter()
+                    .map(|l| (l.claim_key.clone(), l.headline.clone())),
+            )
             .collect();
 
         let previous = self.situations.get(scope);
@@ -603,15 +652,26 @@ impl Writer {
                     == mask_header(&text, self.rev, now)
             })
             .map(|s| s.situation.clone());
-        let situation = retained.unwrap_or(Situation { scope: scope.to_string(), text, rev: self.rev, as_of: now });
+        let situation = retained.unwrap_or(Situation {
+            scope: scope.to_string(),
+            text,
+            rev: self.rev,
+            as_of: now,
+        });
 
         // Keep the stored inputs' header fields in step with the document
         // they belong to, so a custom `%{header}` agrees with `Situation.rev`.
         inputs.rev = situation.rev;
         inputs.as_of_ms = situation.as_of;
 
-        self.situations
-            .insert(scope.to_string(), Arc::new(SituationState { situation, inputs, membership }));
+        self.situations.insert(
+            scope.to_string(),
+            Arc::new(SituationState {
+                situation,
+                inputs,
+                membership,
+            }),
+        );
     }
 
     /// Write-path step 8: publish the new snapshot. This is the moment the
@@ -646,7 +706,11 @@ impl Writer {
 /// to "optional": it only *means* anything where a score exists, so pairing
 /// it with any view but `Urgent` is a malformed request rather than a filter
 /// that silently matches everything.
-pub(crate) fn select(snapshot: &WorldSnapshot, view: View, filter: Filter) -> Result<Vec<Row>, ClogError> {
+pub(crate) fn select(
+    snapshot: &WorldSnapshot,
+    view: View,
+    filter: Filter,
+) -> Result<Vec<Row>, ClogError> {
     if filter.min_score.is_some() && !matches!(view, View::Urgent { .. }) {
         return Err(ClogError::InvalidFilter {
             reason: "min_score is only meaningful for View::Urgent".into(),
@@ -658,10 +722,12 @@ pub(crate) fn select(snapshot: &WorldSnapshot, view: View, filter: Filter) -> Re
     // may name an entity the way the host knows it while the claim names the
     // one it was merged into, or vice versa (§5.2 — every view that filters
     // by entity resolves through the alias map).
-    let wanted: Option<BTreeSet<EntityKey>> = filter
-        .entities
-        .as_ref()
-        .map(|entities| entities.iter().map(|e| views.aliases.resolve(&e.key())).collect());
+    let wanted: Option<BTreeSet<EntityKey>> = filter.entities.as_ref().map(|entities| {
+        entities
+            .iter()
+            .map(|e| views.aliases.resolve(&e.key()))
+            .collect()
+    });
 
     // `(claim_key, stored claim, score)` in the view's order. Scores exist
     // only in `urgent`, which is the only view that ranks.
@@ -687,7 +753,9 @@ pub(crate) fn select(snapshot: &WorldSnapshot, view: View, filter: Filter) -> Re
                 .into_iter()
                 .flatten()
                 .filter(|(_, key)| !is_reserved(key))
-                .filter_map(|(score, key)| Some((key.as_str(), views.claims.get(key.as_str())?, Some(*score))))
+                .filter_map(|(score, key)| {
+                    Some((key.as_str(), views.claims.get(key.as_str())?, Some(*score)))
+                })
                 .collect()
         }
         // Uncapped: §5.3's N=8 is a *rendering* cap, and a structured read
@@ -711,7 +779,9 @@ pub(crate) fn select(snapshot: &WorldSnapshot, view: View, filter: Filter) -> Re
                 for (_, stored) in believed {
                     // Re-borrowed out of the snapshot so the row keeps the
                     // snapshot's lifetime rather than `entity_state`'s clone.
-                    let Some(stored) = views.claims.get(stored.claim.claim_key.as_str()) else { continue };
+                    let Some(stored) = views.claims.get(stored.claim.claim_key.as_str()) else {
+                        continue;
+                    };
                     let key = stored.claim.claim_key.as_str();
                     if seen.insert(key) {
                         rows.push((key, stored, None));
@@ -724,7 +794,9 @@ pub(crate) fn select(snapshot: &WorldSnapshot, view: View, filter: Filter) -> Re
 
     Ok(ordered
         .into_iter()
-        .filter(|(key, stored, score)| matches_filter(views, key, stored, *score, &filter, wanted.as_ref()))
+        .filter(|(key, stored, score)| {
+            matches_filter(views, key, stored, *score, &filter, wanted.as_ref())
+        })
         .take(limit)
         .map(|(key, stored, score)| hydrate(views, key, stored, score))
         .collect())
@@ -757,12 +829,18 @@ fn matches_filter(
 ) -> bool {
     let claim = &stored.claim;
     if let Some(kinds) = &filter.kinds
-        && !views.kinds.get(key).is_some_and(|label| kinds.contains(&label.kind))
+        && !views
+            .kinds
+            .get(key)
+            .is_some_and(|label| kinds.contains(&label.kind))
     {
         return false;
     }
     if let Some(wanted) = wanted
-        && !claim.entities.iter().any(|e| wanted.contains(&views.aliases.resolve(&e.key())))
+        && !claim
+            .entities
+            .iter()
+            .any(|e| wanted.contains(&views.aliases.resolve(&e.key())))
     {
         return false;
     }
@@ -772,7 +850,10 @@ fn matches_filter(
         return false;
     }
     if let Some(prefix) = &filter.subject_prefix
-        && !claim.subject_key.as_ref().is_some_and(|s| s.starts_with(prefix.as_str()))
+        && !claim
+            .subject_key
+            .as_ref()
+            .is_some_and(|s| s.starts_with(prefix.as_str()))
     {
         return false;
     }
@@ -803,11 +884,9 @@ fn hydrate(views: &WorldViews, key: &str, stored: &StoredClaim, score: Option<f3
         recorded_at: stored.recorded_at,
         kind: views.kinds.get(key).cloned(),
         score,
-        believed: stored
-            .claim
-            .subject_key
-            .as_deref()
-            .map(|subject| matches!(views.believed.get(subject), Some(Some(winner)) if winner == key)),
+        believed: stored.claim.subject_key.as_deref().map(
+            |subject| matches!(views.believed.get(subject), Some(Some(winner)) if winner == key),
+        ),
     }
 }
 
@@ -821,7 +900,11 @@ fn hydrate(views: &WorldViews, key: &str, stored: &StoredClaim, score: Option<f3
 /// the `rev {n} · {ts}` pair blanks exactly the header and nothing else —
 /// a claim body that happened to contain the same bytes sits after it.
 fn mask_header(text: &str, rev: Rev, as_of: u64) -> String {
-    text.replacen(&format!("rev {rev} · {}", rfc3339_utc(as_of)), "rev _ · _", 1)
+    text.replacen(
+        &format!("rev {rev} · {}", rfc3339_utc(as_of)),
+        "rev _ · _",
+        1,
+    )
 }
 
 /// Builds one scope's slot inputs from the materialized views (§5.7, §5.8).
@@ -870,11 +953,22 @@ fn slot_inputs(views: &WorldViews, scope: &str, rev: Rev, as_of_ms: u64) -> Slot
         .filter(|(_, _, rows)| !rows.is_empty())
         .map(|(_, display, rows)| EntityItem {
             display,
-            summaries: rows.iter().map(|(_, stored)| headline(&stored.claim.body)).collect(),
+            summaries: rows
+                .iter()
+                .map(|(_, stored)| headline(&stored.claim.body))
+                .collect(),
         })
         .collect();
 
-    SlotInputs { scope: scope.to_string(), rev, as_of_ms, urgent, open_loops, entities, changes: Vec::new() }
+    SlotInputs {
+        scope: scope.to_string(),
+        rev,
+        as_of_ms,
+        urgent,
+        open_loops,
+        entities,
+        changes: Vec::new(),
+    }
 }
 
 /// The `changes` slot: the membership delta between the last two rendered
@@ -885,7 +979,10 @@ fn slot_inputs(views: &WorldViews, scope: &str, rev: Rev, as_of_ms: u64) -> Slot
 /// produces nothing even if its headline changed: this slot tracks
 /// membership, not content. Removed items take their headline from the
 /// *previous* render, because a removed claim is no longer live to read.
-fn changes_since(previous: Option<&OrdMap<String, String>>, current: &OrdMap<String, String>) -> Vec<ChangeItem> {
+fn changes_since(
+    previous: Option<&OrdMap<String, String>>,
+    current: &OrdMap<String, String>,
+) -> Vec<ChangeItem> {
     let empty = OrdMap::new();
     let previous = previous.unwrap_or(&empty);
     let mut changes: Vec<ChangeItem> = current
@@ -909,7 +1006,10 @@ mod tests {
 
     fn manual_cfg(dir: &std::path::Path) -> Config {
         let mut cfg = Config::default_for(dir);
-        cfg.tick = TickConfig { mode: ClockMode::Manual, interval_ms: 60_000 };
+        cfg.tick = TickConfig {
+            mode: ClockMode::Manual,
+            interval_ms: 60_000,
+        };
         cfg
     }
 
@@ -920,7 +1020,8 @@ mod tests {
         assert_eq!(scopes.keys().collect::<Vec<_>>(), vec![DEFAULT_SCOPE]);
 
         let mut cfg = manual_cfg(dir.path());
-        cfg.scopes.insert("bad".into(), Focus::uniform().weight("no-such-kind", 2.0));
+        cfg.scopes
+            .insert("bad".into(), Focus::uniform().weight("no-such-kind", 2.0));
         assert!(matches!(resolve_scopes(&cfg), Err(ClogError::UnknownKind)));
     }
 
@@ -937,10 +1038,18 @@ mod tests {
 
     #[test]
     fn changes_are_adds_then_removes_each_key_ordered() {
-        let previous: OrdMap<String, String> =
-            [("b".to_string(), "bee".to_string()), ("c".to_string(), "cee".to_string())].into_iter().collect();
-        let current: OrdMap<String, String> =
-            [("a".to_string(), "ay".to_string()), ("c".to_string(), "cee2".to_string())].into_iter().collect();
+        let previous: OrdMap<String, String> = [
+            ("b".to_string(), "bee".to_string()),
+            ("c".to_string(), "cee".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let current: OrdMap<String, String> = [
+            ("a".to_string(), "ay".to_string()),
+            ("c".to_string(), "cee2".to_string()),
+        ]
+        .into_iter()
+        .collect();
         let rendered: Vec<String> = changes_since(Some(&previous), &current)
             .iter()
             .map(|c| match c {

@@ -466,7 +466,11 @@ impl Config {
             path: path.into(),
             scopes: BTreeMap::new(),
             kinds: KindTaxonomy::default_taxonomy(),
-            loop_kinds: vec!["question".to_string(), "risk".to_string(), "commitment".to_string()],
+            loop_kinds: vec![
+                "question".to_string(),
+                "risk".to_string(),
+                "commitment".to_string(),
+            ],
             top_k: 12,
             budget_chars: 6000,
             tick: TickConfig::default(),
@@ -551,13 +555,20 @@ mod tests {
             observed_at: 2_000,
             reliability: Reliability::B,
             credibility: Credibility::Two,
-            entities: vec![EntityRef { etype: "project".into(), id: "halcyon".into(), name: Some("Halcyon".into()) }],
+            entities: vec![EntityRef {
+                etype: "project".into(),
+                id: "halcyon".into(),
+                name: Some("Halcyon".into()),
+            }],
             body: "Invoice 1042 is 30 days overdue".into(),
         };
         let bytes = postcard::to_allocvec(&c).unwrap();
         assert_eq!(postcard::from_bytes::<Claim>(&bytes).unwrap(), c);
 
-        let f = Focus::uniform().weight("risk", 2.5).half_life_days(3.0).top_k(8);
+        let f = Focus::uniform()
+            .weight("risk", 2.5)
+            .half_life_days(3.0)
+            .top_k(8);
         let json = serde_json_like_roundtrip(&f); // via postcard, same as above
         assert_eq!(json.weights.get("risk"), Some(&2.5));
         assert_eq!(json.half_life_days, 3.0);
@@ -570,8 +581,16 @@ mod tests {
 
     #[test]
     fn entity_ref_identity_ignores_name() {
-        let a = EntityRef { etype: "person".into(), id: "sam".into(), name: Some("Sam".into()) };
-        let b = EntityRef { etype: "person".into(), id: "sam".into(), name: None };
+        let a = EntityRef {
+            etype: "person".into(),
+            id: "sam".into(),
+            name: Some("Sam".into()),
+        };
+        let b = EntityRef {
+            etype: "person".into(),
+            id: "sam".into(),
+            name: None,
+        };
         assert_eq!(a, b);
         use std::collections::BTreeSet;
         let mut s = BTreeSet::new();

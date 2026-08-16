@@ -18,7 +18,15 @@ pub(crate) struct BeliefInput<'a> {
 /// The §5.3 total order as a max-key: later `occurred_at` wins; tie goes to
 /// better reliability, then better credibility, then later `recorded_at`,
 /// then the lexicographically larger `claim_key`.
-pub(crate) fn belief_key(c: &BeliefInput) -> (u64, std::cmp::Reverse<u8>, std::cmp::Reverse<u8>, u64, String) {
+pub(crate) fn belief_key(
+    c: &BeliefInput,
+) -> (
+    u64,
+    std::cmp::Reverse<u8>,
+    std::cmp::Reverse<u8>,
+    u64,
+    String,
+) {
     (
         c.claim.occurred_at,
         std::cmp::Reverse(c.claim.reliability.rank()),
@@ -37,7 +45,10 @@ pub(crate) fn belief_key(c: &BeliefInput) -> (u64, std::cmp::Reverse<u8>, std::c
 /// returned. Otherwise the winner is the max by [`belief_key`] among the
 /// eligible members.
 pub(crate) fn resolve<'a>(group: &[BeliefInput<'a>], floor: Credibility) -> Option<&'a Claim> {
-    let eligible: Vec<&BeliefInput<'a>> = group.iter().filter(|c| c.claim.credibility.rank() <= floor.rank()).collect();
+    let eligible: Vec<&BeliefInput<'a>> = group
+        .iter()
+        .filter(|c| c.claim.credibility.rank() <= floor.rank())
+        .collect();
 
     if eligible.is_empty() {
         return if group.len() == 1 {
@@ -47,7 +58,10 @@ pub(crate) fn resolve<'a>(group: &[BeliefInput<'a>], floor: Credibility) -> Opti
         };
     }
 
-    eligible.into_iter().max_by_key(|c| belief_key(c)).map(|c| c.claim)
+    eligible
+        .into_iter()
+        .max_by_key(|c| belief_key(c))
+        .map(|c| c.claim)
 }
 
 #[cfg(test)]
@@ -68,8 +82,8 @@ mod tests {
 
     #[test]
     fn u_belief_1_total_order() {
-        use Reliability::*;
         use Credibility::*;
+        use Reliability::*;
         // each later claim beats all before it, per one tier of the order
         let a = claim("a", 100, F, Six); // baseline
         let b = claim("b", 100, F, Five); // better credibility
@@ -78,14 +92,38 @@ mod tests {
         let claims = [&a, &b, &c, &d];
         // recorded_at all equal; exhaustive permutations of arrival order
         for perm in permutations(&claims) {
-            let group: Vec<BeliefInput> = perm.iter().map(|c| BeliefInput { claim: c, recorded_at: 1 }).collect();
+            let group: Vec<BeliefInput> = perm
+                .iter()
+                .map(|c| BeliefInput {
+                    claim: c,
+                    recorded_at: 1,
+                })
+                .collect();
             assert_eq!(resolve(&group, Credibility::Six).unwrap().claim_key, "d");
         }
         // tie on everything but recorded_at
-        let g = [BeliefInput { claim: &a, recorded_at: 5 }, BeliefInput { claim: &b0(&a, "a2"), recorded_at: 9 }];
+        let g = [
+            BeliefInput {
+                claim: &a,
+                recorded_at: 5,
+            },
+            BeliefInput {
+                claim: &b0(&a, "a2"),
+                recorded_at: 9,
+            },
+        ];
         assert_eq!(resolve(&g, Credibility::Six).unwrap().claim_key, "a2");
         // full tie -> lexicographically larger claim_key
-        let g = [BeliefInput { claim: &a, recorded_at: 5 }, BeliefInput { claim: &b0(&a, "z"), recorded_at: 5 }];
+        let g = [
+            BeliefInput {
+                claim: &a,
+                recorded_at: 5,
+            },
+            BeliefInput {
+                claim: &b0(&a, "z"),
+                recorded_at: 5,
+            },
+        ];
         assert_eq!(resolve(&g, Credibility::Six).unwrap().claim_key, "z");
     }
 
@@ -113,18 +151,39 @@ mod tests {
 
     #[test]
     fn u_belief_2_credibility_floor() {
-        use Reliability::*;
         use Credibility::*;
+        use Reliability::*;
         let good = claim("good", 100, A, Two);
         let bad = claim("bad", 200, A, Five); // newer but below floor Three
-        let g = [BeliefInput { claim: &good, recorded_at: 1 }, BeliefInput { claim: &bad, recorded_at: 2 }];
+        let g = [
+            BeliefInput {
+                claim: &good,
+                recorded_at: 1,
+            },
+            BeliefInput {
+                claim: &bad,
+                recorded_at: 2,
+            },
+        ];
         assert_eq!(resolve(&g, Three).unwrap().claim_key, "good");
         // only-claim exception
-        let g = [BeliefInput { claim: &bad, recorded_at: 2 }];
+        let g = [BeliefInput {
+            claim: &bad,
+            recorded_at: 2,
+        }];
         assert_eq!(resolve(&g, Three).unwrap().claim_key, "bad");
         // all floored, >= 2 members -> nobody believed
         let bad2 = claim("bad2", 300, A, Six);
-        let g = [BeliefInput { claim: &bad, recorded_at: 2 }, BeliefInput { claim: &bad2, recorded_at: 3 }];
+        let g = [
+            BeliefInput {
+                claim: &bad,
+                recorded_at: 2,
+            },
+            BeliefInput {
+                claim: &bad2,
+                recorded_at: 3,
+            },
+        ];
         assert!(resolve(&g, Three).is_none());
     }
 }

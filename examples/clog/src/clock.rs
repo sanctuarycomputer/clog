@@ -59,7 +59,9 @@ impl Clock {
                 // `fetch_update` rather than `fetch_add` so the saturation is
                 // atomic too: two concurrent advances can never wrap.
                 counter
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |now| Some(now.saturating_add(ms)))
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |now| {
+                        Some(now.saturating_add(ms))
+                    })
                     .unwrap_or(0)
                     .saturating_add(ms)
             }

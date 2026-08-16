@@ -68,10 +68,15 @@ pub(crate) mod actor;
 /// Dropping the last handle shuts the instance down: the writer finishes
 /// any in-flight batch, fsyncs the WAL and exits before `drop` returns.
 ///
-/// ```no_run
+/// The full host loop — open, observe, read a situation, retract a
+/// correction, read again — also lives as a runnable example at
+/// `examples/quickstart.rs` (`cargo run -p clog --example quickstart`):
+///
+/// ```
 /// use clog::*;
 ///
-/// let handle = Clog::open(Config::default_for("/var/lib/my-agent/clog"))?;
+/// let dir = tempfile::tempdir()?;
+/// let handle = Clog::open(Config::default_for(dir.path()))?;
 /// handle.observe(
 ///     vec![Claim {
 ///         claim_key: "halcyon:inv-1042".into(),
@@ -88,8 +93,15 @@ pub(crate) mod actor;
 ///     }],
 ///     ObserveOpts::default(),
 /// )?;
-/// println!("{}", handle.situation(None, None)?.text);
-/// # Ok::<(), ClogError>(())
+/// let before = handle.situation(None, None)?;
+/// assert!(before.text.contains("Invoice 1042"));
+///
+/// // A correction flows back as a retract, not a mutation.
+/// handle.retract("halcyon:inv-1042")?;
+/// let after = handle.situation(None, None)?;
+/// assert!(after.rev > before.rev);
+/// assert!(!after.text.contains("## urgent\n1."));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[derive(Clone)]
 pub struct Clog {
@@ -190,7 +202,9 @@ impl Clog {
     ///   fails;
     /// - `ClogError::ShuttingDown` if the instance is stopping.
     pub fn retract(&self, claim_key: &str) -> Result<Ack, ClogError> {
-        self.write(WriteOp::Retract { claim_key: claim_key.to_string() })
+        self.write(WriteOp::Retract {
+            claim_key: claim_key.to_string(),
+        })
     }
 
     /// Withdraws everything an observer ever said, in one batch.
@@ -219,7 +233,9 @@ impl Clog {
     ///   fails;
     /// - `ClogError::ShuttingDown` if the instance is stopping.
     pub fn revoke_observer(&self, observer: &ObserverId) -> Result<Ack, ClogError> {
-        self.write(WriteOp::RevokeObserver { observer: observer.clone() })
+        self.write(WriteOp::RevokeObserver {
+            observer: observer.clone(),
+        })
     }
 
     /// Declares that `alias` and `canonical` are the same entity: every view
@@ -258,8 +274,15 @@ impl Clog {
     /// - `ClogError::Storage` / `ClogError::Corrupt` if the log append
     ///   fails;
     /// - `ClogError::ShuttingDown` if the instance is stopping.
-    pub fn merge_entities(&self, alias: &EntityRef, canonical: &EntityRef) -> Result<Ack, ClogError> {
-        self.write(WriteOp::Merge { alias: alias.clone(), canonical: canonical.clone() })
+    pub fn merge_entities(
+        &self,
+        alias: &EntityRef,
+        canonical: &EntityRef,
+    ) -> Result<Ack, ClogError> {
+        self.write(WriteOp::Merge {
+            alias: alias.clone(),
+            canonical: canonical.clone(),
+        })
     }
 
     /// Reads rows out of one materialized view, filtered.
@@ -342,19 +365,29 @@ impl Clog {
     /// - `ClogError::TemplateError` if `template` does not parse. That
     ///   rejects the call only; nothing is written and no stored document
     ///   is affected.
-    pub fn situation(&self, scope: Option<&str>, template: Option<&str>) -> Result<Situation, ClogError> {
+    pub fn situation(
+        &self,
+        scope: Option<&str>,
+        template: Option<&str>,
+    ) -> Result<Situation, ClogError> {
         // `load_full` rather than `load`: parsing and rendering a custom
         // template is unbounded caller-supplied work, and an `ArcSwap` guard
         // must not be held across it.
         let snapshot = self.inner.snapshot.load_full();
         let scope = scope.unwrap_or(DEFAULT_SCOPE);
-        let state = snapshot.situations.get(scope).ok_or(ClogError::UnknownScope)?;
+        let state = snapshot
+            .situations
+            .get(scope)
+            .ok_or(ClogError::UnknownScope)?;
         match template {
             None => Ok(state.situation.clone()),
             Some(source) => {
                 let template = parse(source)?;
                 let text = render(&template, &state.inputs, self.inner.budget_chars);
-                Ok(Situation { text, ..state.situation.clone() })
+                Ok(Situation {
+                    text,
+                    ..state.situation.clone()
+                })
             }
         }
     }
@@ -382,7 +415,10 @@ impl Clog {
             return Err(ClogError::ManualClockRequired);
         }
         let (reply, done) = bounded(1);
-        self.inner.tx.send(Cmd::Advance(ms, reply)).map_err(|_| ClogError::ShuttingDown)?;
+        self.inner
+            .tx
+            .send(Cmd::Advance(ms, reply))
+            .map_err(|_| ClogError::ShuttingDown)?;
         done.recv().map_err(|_| ClogError::ShuttingDown)
     }
 
@@ -390,7 +426,10 @@ impl Clog {
     /// full queue blocks here: backpressure is the point (spec §6.1).
     fn write(&self, op: WriteOp) -> Result<Ack, ClogError> {
         let (reply, ack) = bounded(1);
-        self.inner.tx.send(Cmd::Write(WriteReq { op, reply })).map_err(|_| ClogError::ShuttingDown)?;
+        self.inner
+            .tx
+            .send(Cmd::Write(WriteReq { op, reply }))
+            .map_err(|_| ClogError::ShuttingDown)?;
         ack.recv().map_err(|_| ClogError::ShuttingDown)?
     }
 }

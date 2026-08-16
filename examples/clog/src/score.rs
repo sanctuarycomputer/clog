@@ -23,7 +23,11 @@ pub(crate) fn trust(r: Reliability, c: Credibility) -> f32 {
 /// Bucket width is `half_life_days / buckets_per_half_life`. A negative age
 /// (an `occurred_at` in the future, after clamping) is treated as age zero,
 /// clamping to the first bucket's midpoint.
-pub(crate) fn bucket_age_days(age_days: f32, half_life_days: f32, buckets_per_half_life: u32) -> f32 {
+pub(crate) fn bucket_age_days(
+    age_days: f32,
+    half_life_days: f32,
+    buckets_per_half_life: u32,
+) -> f32 {
     let w = half_life_days / buckets_per_half_life as f32;
     if age_days < 0.0 {
         return w / 2.0;
@@ -49,11 +53,15 @@ pub(crate) fn score_claim(
     now_ms: u64,
     buckets_per_half_life: u32,
 ) -> f32 {
-    let age_days = (now_ms.saturating_sub(scoring_clamp(claim.occurred_at, now_ms))) as f32 / 86_400_000.0;
+    let age_days =
+        (now_ms.saturating_sub(scoring_clamp(claim.occurred_at, now_ms))) as f32 / 86_400_000.0;
     let bucket_age = bucket_age_days(age_days, focus.half_life_days, buckets_per_half_life);
     let rec = recency(bucket_age, focus.half_life_days);
     let trust_val = trust(claim.reliability, claim.credibility);
-    let kind_weight = kind.and_then(|k| focus.weights.get(k)).copied().unwrap_or(1.0);
+    let kind_weight = kind
+        .and_then(|k| focus.weights.get(k))
+        .copied()
+        .unwrap_or(1.0);
     let boost: f32 = focus
         .boosts
         .iter()
@@ -92,14 +100,31 @@ mod tests {
     fn u_score_1_full_formula_with_boost_stacking() {
         let focus = Focus::uniform()
             .weight("risk", 2.0)
-            .boost(EntityRef { etype: "project".into(), id: "halcyon".into(), name: None }, 1.5)
-            .boost(EntityRef { etype: "person".into(), id: "sam".into(), name: None }, 2.0);
+            .boost(
+                EntityRef {
+                    etype: "project".into(),
+                    id: "halcyon".into(),
+                    name: None,
+                },
+                1.5,
+            )
+            .boost(
+                EntityRef {
+                    etype: "person".into(),
+                    id: "sam".into(),
+                    name: None,
+                },
+                2.0,
+            );
         let mut claim = crate::validate::tests_base_claim(); // helper added in step 3
         claim.reliability = Reliability::B; // 0.90
         claim.credibility = Credibility::Three; // 0.75
         let now = 10 * DAY_MS;
         claim.occurred_at = now; // age 0 -> bucket midpoint 0.875d
-        let ents = vec![("project".to_string(), "halcyon".to_string()), ("person".to_string(), "sam".to_string())];
+        let ents = vec![
+            ("project".to_string(), "halcyon".to_string()),
+            ("person".to_string(), "sam".to_string()),
+        ];
         let expected = 2.0 * (0.90 * 0.75) * 0.5f32.powf((0.875f32) / 7.0) * 1.5 * 2.0; // both boosts stack multiplicatively
         let got = score_claim(&claim, Some("risk"), &focus, &ents, now, 4);
         assert!((got - expected).abs() < 1e-6, "{got} vs {expected}");

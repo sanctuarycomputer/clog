@@ -46,18 +46,29 @@ fn arb_claim() -> impl Strategy<Value = Claim> {
                     Credibility::Six,
                 ][cred as usize],
                 entities: if with_ent {
-                    vec![EntityRef { etype: "p".into(), id: "a".into(), name: None }]
+                    vec![EntityRef {
+                        etype: "p".into(),
+                        id: "a".into(),
+                        name: None,
+                    }]
                 } else {
                     vec![]
                 },
-                body: words.iter().map(|w| vocab[*w as usize]).collect::<Vec<_>>().join(" "),
+                body: words
+                    .iter()
+                    .map(|w| vocab[*w as usize])
+                    .collect::<Vec<_>>()
+                    .join(" "),
             }
         })
 }
 
 fn open_manual(dir: &std::path::Path) -> Clog {
     let mut c = Config::default_for(dir);
-    c.tick = TickConfig { mode: ClockMode::Manual, interval_ms: 60_000 };
+    c.tick = TickConfig {
+        mode: ClockMode::Manual,
+        interval_ms: 60_000,
+    };
     let h = Clog::open(c).unwrap();
     h.advance(1_000_000).unwrap();
     h
@@ -80,7 +91,11 @@ fn norm(s: &Situation) -> String {
 }
 
 fn live_keys(c: &Clog) -> Vec<String> {
-    c.select(View::Live, Filter::default()).unwrap().into_iter().map(|r| r.claim.claim_key).collect()
+    c.select(View::Live, Filter::default())
+        .unwrap()
+        .into_iter()
+        .map(|r| r.claim.claim_key)
+        .collect()
 }
 
 proptest! {

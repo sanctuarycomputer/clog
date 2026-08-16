@@ -48,7 +48,10 @@ fn merge_edge(claim: &Claim) -> Option<(EntityKey, EntityKey)> {
     let [alias_etype, alias_id, canonical_etype, canonical_id] = parts[..] else {
         return None;
     };
-    if [alias_etype, alias_id, canonical_etype, canonical_id].iter().any(|f| f.is_empty()) {
+    if [alias_etype, alias_id, canonical_etype, canonical_id]
+        .iter()
+        .any(|f| f.is_empty())
+    {
         return None;
     }
     Some((
@@ -96,7 +99,10 @@ pub(crate) struct NaiveEngine {
 impl NaiveEngine {
     /// An engine over an empty world.
     pub(crate) fn new(cfg: NaiveCfg) -> Self {
-        NaiveEngine { views: WorldViews::default(), cfg }
+        NaiveEngine {
+            views: WorldViews::default(),
+            cfg,
+        }
     }
 
     // ---- events -------------------------------------------------------
@@ -106,7 +112,11 @@ impl NaiveEngine {
     /// the old version's indexes, kind and alias edge are dropped first.
     fn observe(&mut self, sc: &StoredClaim) -> bool {
         let key = sc.claim.claim_key.clone();
-        let previous_subject = self.views.claims.get(&key).and_then(|old| old.claim.subject_key.clone());
+        let previous_subject = self
+            .views
+            .claims
+            .get(&key)
+            .and_then(|old| old.claim.subject_key.clone());
         self.remove_live(&key);
 
         self.views.claims.insert(key.clone(), sc.clone());
@@ -146,7 +156,11 @@ impl NaiveEngine {
         }
         self.views.kinds.insert(
             claim_key.to_string(),
-            KindLabel { kind: kind.to_string(), confidence, source },
+            KindLabel {
+                kind: kind.to_string(),
+                confidence,
+                source,
+            },
         );
         self.recompute_membership(claim_key);
         true
@@ -158,7 +172,9 @@ impl NaiveEngine {
     /// `claim_key` order and the resulting views are replay-deterministic
     /// (INV-11). Returns whether any live claim was removed.
     fn revoke(&mut self, observer: &ObserverId) -> bool {
-        let Some(keys) = self.views.by_observer.get(&observer.0) else { return false };
+        let Some(keys) = self.views.by_observer.get(&observer.0) else {
+            return false;
+        };
         let keys: Vec<String> = keys.iter().cloned().collect();
         let mut touched = false;
         for key in keys {
@@ -173,7 +189,9 @@ impl NaiveEngine {
     /// merge claim (U-ALIAS-3), and heals the derived registries. Returns
     /// whether a live claim was removed.
     fn remove_live(&mut self, claim_key: &str) -> bool {
-        let Some(old) = self.views.claims.remove(claim_key) else { return false };
+        let Some(old) = self.views.claims.remove(claim_key) else {
+            return false;
+        };
         self.unindex_claim(&old.claim);
         self.views.kinds.remove(claim_key);
         self.views.unclassified.remove(claim_key);
@@ -196,9 +214,17 @@ impl NaiveEngine {
     /// entity.
     fn reindex_claim(&mut self, claim: &Claim) {
         if let Some(subject) = &claim.subject_key {
-            index_add(&mut self.views.by_subject, subject.clone(), &claim.claim_key);
+            index_add(
+                &mut self.views.by_subject,
+                subject.clone(),
+                &claim.claim_key,
+            );
         }
-        index_add(&mut self.views.by_observer, claim.observer.0.clone(), &claim.claim_key);
+        index_add(
+            &mut self.views.by_observer,
+            claim.observer.0.clone(),
+            &claim.claim_key,
+        );
         for e in &claim.entities {
             let canonical = self.views.aliases.resolve(&e.key());
             index_add(&mut self.views.by_entity, canonical, &claim.claim_key);
@@ -212,7 +238,11 @@ impl NaiveEngine {
         if let Some(subject) = &claim.subject_key {
             index_remove(&mut self.views.by_subject, subject, &claim.claim_key);
         }
-        index_remove(&mut self.views.by_observer, &claim.observer.0, &claim.claim_key);
+        index_remove(
+            &mut self.views.by_observer,
+            &claim.observer.0,
+            &claim.claim_key,
+        );
         for e in &claim.entities {
             let canonical = self.views.aliases.resolve(&e.key());
             index_remove(&mut self.views.by_entity, &canonical, &claim.claim_key);
@@ -276,7 +306,9 @@ impl NaiveEngine {
             for e in &sc.claim.entities {
                 let Some(name) = &e.name else { continue };
                 let canonical = self.views.aliases.resolve(&e.key());
-                let newer = names.get(&canonical).is_none_or(|(at, _)| sc.recorded_at >= *at);
+                let newer = names
+                    .get(&canonical)
+                    .is_none_or(|(at, _)| sc.recorded_at >= *at);
                 if newer {
                     names.insert(canonical, (sc.recorded_at, name.clone()));
                 }
@@ -305,7 +337,10 @@ impl NaiveEngine {
         }
         let group: Vec<BeliefInput> = members
             .iter()
-            .map(|sc| BeliefInput { claim: &sc.claim, recorded_at: sc.recorded_at })
+            .map(|sc| BeliefInput {
+                claim: &sc.claim,
+                recorded_at: sc.recorded_at,
+            })
             .collect();
         let winner = belief::resolve(&group, self.cfg.belief_floor).map(|c| c.claim_key.clone());
         self.views.believed.insert(subject.to_string(), winner);
@@ -366,11 +401,21 @@ impl NaiveEngine {
                 .iter()
                 .filter(|(key, _)| !is_reserved(key))
                 .map(|(key, sc)| {
-                    let entities: Vec<EntityKey> =
-                        sc.claim.entities.iter().map(|e| self.views.aliases.resolve(&e.key())).collect();
+                    let entities: Vec<EntityKey> = sc
+                        .claim
+                        .entities
+                        .iter()
+                        .map(|e| self.views.aliases.resolve(&e.key()))
+                        .collect();
                     let kind = self.views.kinds.get(key).map(|l| l.kind.as_str());
-                    let score =
-                        score_claim(&sc.claim, kind, focus, &entities, now_ms, self.cfg.buckets_per_half_life);
+                    let score = score_claim(
+                        &sc.claim,
+                        kind,
+                        focus,
+                        &entities,
+                        now_ms,
+                        self.cfg.buckets_per_half_life,
+                    );
                     (score, key.clone())
                 })
                 .collect();
@@ -433,7 +478,10 @@ pub(crate) fn entity_state(views: &WorldViews, cap: Option<usize>) -> Vec<Entity
             })
             .collect();
         rows.sort_by(|a, b| {
-            b.1.claim.occurred_at.cmp(&a.1.claim.occurred_at).then_with(|| a.1.claim.claim_key.cmp(&b.1.claim.claim_key))
+            b.1.claim
+                .occurred_at
+                .cmp(&a.1.claim.occurred_at)
+                .then_with(|| a.1.claim.claim_key.cmp(&b.1.claim.claim_key))
         });
         if let Some(cap) = cap {
             rows.truncate(cap);
@@ -444,15 +492,23 @@ pub(crate) fn entity_state(views: &WorldViews, cap: Option<usize>) -> Vec<Entity
 }
 
 impl Engine for NaiveEngine {
-    fn apply(&mut self, events: &[Event], scopes: &BTreeMap<String, Focus>, now_ms: u64) -> ApplyResult {
+    fn apply(
+        &mut self,
+        events: &[Event],
+        scopes: &BTreeMap<String, Focus>,
+        now_ms: u64,
+    ) -> ApplyResult {
         let mut touched = false;
         for event in events {
             let effect = match event {
                 Event::Observe(sc) => self.observe(sc),
                 Event::Retract { claim_key } => self.retract(claim_key),
-                Event::Judge { claim_key, kind, confidence, source } => {
-                    self.judge(claim_key, kind, *confidence, *source)
-                }
+                Event::Judge {
+                    claim_key,
+                    kind,
+                    confidence,
+                    source,
+                } => self.judge(claim_key, kind, *confidence, *source),
                 Event::Revoke { observer } => self.revoke(observer),
                 // The actor owns `scopes` and the clock, and only forwards a
                 // `Tick` when a claim actually crossed a decay bucket (§5.5),
@@ -479,8 +535,12 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn cfg() -> NaiveCfg {
-        NaiveCfg { loop_kinds: vec!["question".into(), "risk".into(), "commitment".into()],
-                   top_k: 12, buckets_per_half_life: 4, belief_floor: Credibility::Six }
+        NaiveCfg {
+            loop_kinds: vec!["question".into(), "risk".into(), "commitment".into()],
+            top_k: 12,
+            buckets_per_half_life: 4,
+            belief_floor: Credibility::Six,
+        }
     }
     fn scopes() -> BTreeMap<String, Focus> {
         BTreeMap::from([("default".to_string(), Focus::uniform())])
@@ -490,8 +550,12 @@ mod tests {
         c.claim_key = key.into();
         c.subject_key = subject.map(Into::into);
         c.body = body.into();
-        c.occurred_at = occ; c.observed_at = occ;
-        Event::Observe(StoredClaim { claim: c, recorded_at: rec })
+        c.occurred_at = occ;
+        c.observed_at = occ;
+        Event::Observe(StoredClaim {
+            claim: c,
+            recorded_at: rec,
+        })
     }
 
     #[test]
@@ -501,12 +565,21 @@ mod tests {
         e.apply(&[obs("a", Some("s1"), "hello", 10, 10)], &scopes(), 1000);
         assert!(e.views().claims.contains_key("a"));
         assert_eq!(e.views().believed.get("s1"), Some(&Some("a".to_string())));
-        e.apply(&[Event::Retract { claim_key: "a".into() }], &scopes(), 1001);
+        e.apply(
+            &[Event::Retract {
+                claim_key: "a".into(),
+            }],
+            &scopes(),
+            1001,
+        );
         // INV-3: identical to never having observed (view contents, not revs)
         assert!(e.views().claims.is_empty());
         assert!(e.views().believed.is_empty());
         assert!(e.views().by_subject.is_empty());
-        assert_eq!(e.views().urgent.get("default").map(Vec::len), empty.urgent.get("default").map(Vec::len).or(Some(0)));
+        assert_eq!(
+            e.views().urgent.get("default").map(Vec::len),
+            empty.urgent.get("default").map(Vec::len).or(Some(0))
+        );
     }
 
     // Beyond the brief's five: INV-3 says retraction heals *everything*, and
@@ -518,13 +591,42 @@ mod tests {
         c.claim_key = "a".into();
         c.subject_key = Some("s1".into());
         c.observer = ObserverId::from("gmail");
-        c.entities = vec![EntityRef { etype: "p".into(), id: "sam".into(), name: Some("Sam".into()) }];
-        e.apply(&[Event::Observe(StoredClaim { claim: c, recorded_at: 1 })], &scopes(), 100);
-        e.apply(&[Event::Judge { claim_key: "a".into(), kind: "risk".into(), confidence: 1.0, source: JudgeSource::Rule }], &scopes(), 101);
-        assert_eq!(e.views().names.get(&("p".to_string(), "sam".to_string())), Some(&(1, "Sam".to_string())));
+        c.entities = vec![EntityRef {
+            etype: "p".into(),
+            id: "sam".into(),
+            name: Some("Sam".into()),
+        }];
+        e.apply(
+            &[Event::Observe(StoredClaim {
+                claim: c,
+                recorded_at: 1,
+            })],
+            &scopes(),
+            100,
+        );
+        e.apply(
+            &[Event::Judge {
+                claim_key: "a".into(),
+                kind: "risk".into(),
+                confidence: 1.0,
+                source: JudgeSource::Rule,
+            }],
+            &scopes(),
+            101,
+        );
+        assert_eq!(
+            e.views().names.get(&("p".to_string(), "sam".to_string())),
+            Some(&(1, "Sam".to_string()))
+        );
         assert!(e.views().open_loops.contains("a"));
 
-        e.apply(&[Event::Retract { claim_key: "a".into() }], &scopes(), 102);
+        e.apply(
+            &[Event::Retract {
+                claim_key: "a".into(),
+            }],
+            &scopes(),
+            102,
+        );
         assert!(e.views().by_entity.is_empty());
         assert!(e.views().by_observer.is_empty());
         assert!(e.views().names.is_empty());
@@ -536,8 +638,14 @@ mod tests {
     #[test]
     fn belief_competition_and_flags() {
         let mut e = NaiveEngine::new(cfg());
-        e.apply(&[obs("old", Some("s1"), "invoice overdue", 100, 1),
-                  obs("new", Some("s1"), "invoice paid", 200, 2)], &scopes(), 1000);
+        e.apply(
+            &[
+                obs("old", Some("s1"), "invoice overdue", 100, 1),
+                obs("new", Some("s1"), "invoice paid", 200, 2),
+            ],
+            &scopes(),
+            1000,
+        );
         assert_eq!(e.views().believed.get("s1"), Some(&Some("new".to_string())));
     }
 
@@ -547,7 +655,16 @@ mod tests {
         e.apply(&[obs("a", None, "x", 10, 10)], &scopes(), 1000);
         assert!(e.views().unclassified.contains("a"));
         assert!(!e.views().open_loops.contains("a"));
-        e.apply(&[Event::Judge { claim_key: "a".into(), kind: "risk".into(), confidence: 1.0, source: JudgeSource::Rule }], &scopes(), 1001);
+        e.apply(
+            &[Event::Judge {
+                claim_key: "a".into(),
+                kind: "risk".into(),
+                confidence: 1.0,
+                source: JudgeSource::Rule,
+            }],
+            &scopes(),
+            1001,
+        );
         assert!(!e.views().unclassified.contains("a"));
         assert!(e.views().open_loops.contains("a"));
         assert_eq!(e.views().kinds.get("a").unwrap().kind, "risk");
@@ -557,9 +674,16 @@ mod tests {
     fn urgent_ranked_desc_tiebreak_key() {
         let mut e = NaiveEngine::new(cfg());
         // same trust/recency -> equal scores -> claim_key asc breaks tie
-        e.apply(&[obs("b", None, "x", 100, 1), obs("a", None, "y", 100, 1)], &scopes(), 200);
+        e.apply(
+            &[obs("b", None, "x", 100, 1), obs("a", None, "y", 100, 1)],
+            &scopes(),
+            200,
+        );
         let u = e.views().urgent.get("default").unwrap();
-        assert_eq!(u.iter().map(|(_, k)| k.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+        assert_eq!(
+            u.iter().map(|(_, k)| k.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
     }
 
     #[test]
@@ -574,14 +698,26 @@ mod tests {
 
         // INV-8 covers `kinds` too: a reserved claim cannot be judged into a view.
         let key = crate::engine::merge_key(&alias, &canonical);
-        e.apply(&[Event::Judge { claim_key: key, kind: "risk".into(), confidence: 1.0, source: JudgeSource::Rule }], &scopes(), 101);
+        e.apply(
+            &[Event::Judge {
+                claim_key: key,
+                kind: "risk".into(),
+                confidence: 1.0,
+                source: JudgeSource::Rule,
+            }],
+            &scopes(),
+            101,
+        );
         assert!(e.views().kinds.is_empty());
         assert!(e.views().open_loops.is_empty());
     }
 
     /// The `(alias, canonical)` entity-key pair a test names as two tuples.
     fn edge(alias: (&str, &str), canonical: (&str, &str)) -> (EntityKey, EntityKey) {
-        ((alias.0.into(), alias.1.into()), (canonical.0.into(), canonical.1.into()))
+        (
+            (alias.0.into(), alias.1.into()),
+            (canonical.0.into(), canonical.1.into()),
+        )
     }
 
     /// A merge claim carrying the edge `{alias} -> {canonical}`, built through
@@ -592,19 +728,49 @@ mod tests {
         m.claim_key = crate::engine::merge_key(&alias, &canonical);
         m.observer = ObserverId::from("clog");
         m.body = crate::engine::merge_body(&alias, &canonical);
-        Event::Observe(StoredClaim { claim: m, recorded_at: 1 })
+        Event::Observe(StoredClaim {
+            claim: m,
+            recorded_at: 1,
+        })
     }
 
     #[test]
     fn revoke_retracts_all_of_observer_inv6() {
         let mut e = NaiveEngine::new(cfg());
-        let mut c1 = tests_base_claim(); c1.claim_key = "a".into(); c1.observer = ObserverId::from("gmail");
-        let mut c2 = tests_base_claim(); c2.claim_key = "b".into(); c2.observer = ObserverId::from("gmail");
-        let mut c3 = tests_base_claim(); c3.claim_key = "c".into(); c3.observer = ObserverId::from("twist");
-        e.apply(&[Event::Observe(StoredClaim { claim: c1, recorded_at: 1 }),
-                  Event::Observe(StoredClaim { claim: c2, recorded_at: 1 }),
-                  Event::Observe(StoredClaim { claim: c3, recorded_at: 1 })], &scopes(), 100);
-        e.apply(&[Event::Revoke { observer: ObserverId::from("gmail") }], &scopes(), 101);
+        let mut c1 = tests_base_claim();
+        c1.claim_key = "a".into();
+        c1.observer = ObserverId::from("gmail");
+        let mut c2 = tests_base_claim();
+        c2.claim_key = "b".into();
+        c2.observer = ObserverId::from("gmail");
+        let mut c3 = tests_base_claim();
+        c3.claim_key = "c".into();
+        c3.observer = ObserverId::from("twist");
+        e.apply(
+            &[
+                Event::Observe(StoredClaim {
+                    claim: c1,
+                    recorded_at: 1,
+                }),
+                Event::Observe(StoredClaim {
+                    claim: c2,
+                    recorded_at: 1,
+                }),
+                Event::Observe(StoredClaim {
+                    claim: c3,
+                    recorded_at: 1,
+                }),
+            ],
+            &scopes(),
+            100,
+        );
+        e.apply(
+            &[Event::Revoke {
+                observer: ObserverId::from("gmail"),
+            }],
+            &scopes(),
+            101,
+        );
         assert!(!e.views().claims.contains_key("a"));
         assert!(!e.views().claims.contains_key("b"));
         assert!(e.views().claims.contains_key("c"));
@@ -619,17 +785,52 @@ mod tests {
         let mut c = tests_base_claim();
         c.claim_key = "about-a".into();
         c.observer = ObserverId::from("clog");
-        c.entities = vec![EntityRef { etype: "p".into(), id: "a".into(), name: None }];
-        e.apply(&[Event::Observe(StoredClaim { claim: c, recorded_at: 1 }), merge(("p", "a"), ("p", "b"))], &scopes(), 100);
-        assert_eq!(e.views().aliases.resolve(&("p".into(), "a".into())), ("p".into(), "b".into()));
+        c.entities = vec![EntityRef {
+            etype: "p".into(),
+            id: "a".into(),
+            name: None,
+        }];
+        e.apply(
+            &[
+                Event::Observe(StoredClaim {
+                    claim: c,
+                    recorded_at: 1,
+                }),
+                merge(("p", "a"), ("p", "b")),
+            ],
+            &scopes(),
+            100,
+        );
+        assert_eq!(
+            e.views().aliases.resolve(&("p".into(), "a".into())),
+            ("p".into(), "b".into())
+        );
 
-        assert!(!e.apply(&[Event::Revoke { observer: ObserverId::from("nobody") }], &scopes(), 101).touched);
-        e.apply(&[Event::Revoke { observer: ObserverId::from("clog") }], &scopes(), 102);
+        assert!(
+            !e.apply(
+                &[Event::Revoke {
+                    observer: ObserverId::from("nobody")
+                }],
+                &scopes(),
+                101
+            )
+            .touched
+        );
+        e.apply(
+            &[Event::Revoke {
+                observer: ObserverId::from("clog"),
+            }],
+            &scopes(),
+            102,
+        );
         assert!(e.views().claims.is_empty());
         assert!(e.views().by_observer.is_empty());
         assert!(e.views().by_entity.is_empty());
         // the merge claim went with it, so the alias edge did too (INV-3)
-        assert_eq!(e.views().aliases.resolve(&("p".into(), "a".into())), ("p".into(), "a".into()));
+        assert_eq!(
+            e.views().aliases.resolve(&("p".into(), "a".into())),
+            ("p".into(), "a".into())
+        );
     }
 
     #[test]
@@ -637,20 +838,52 @@ mod tests {
         let mut e = NaiveEngine::new(cfg());
         let mut c = tests_base_claim();
         c.claim_key = "about-a".into();
-        c.entities = vec![EntityRef { etype: "p".into(), id: "a".into(), name: Some("Aye".into()) }];
-        e.apply(&[Event::Observe(StoredClaim { claim: c, recorded_at: 1 })], &scopes(), 100);
+        c.entities = vec![EntityRef {
+            etype: "p".into(),
+            id: "a".into(),
+            name: Some("Aye".into()),
+        }];
+        e.apply(
+            &[Event::Observe(StoredClaim {
+                claim: c,
+                recorded_at: 1,
+            })],
+            &scopes(),
+            100,
+        );
 
         let (alias, canonical) = edge(("p", "a"), ("p", "b"));
         e.apply(&[merge(("p", "a"), ("p", "b"))], &scopes(), 101);
         // grouped under canonical b now
-        assert!(e.views().by_entity.get(&("p".into(), "b".into())).unwrap().contains("about-a"));
+        assert!(
+            e.views()
+                .by_entity
+                .get(&("p".into(), "b".into()))
+                .unwrap()
+                .contains("about-a")
+        );
         assert!(e.views().by_entity.get(&("p".into(), "a".into())).is_none());
 
-        e.apply(&[Event::Retract { claim_key: crate::engine::merge_key(&alias, &canonical) }], &scopes(), 102);
+        e.apply(
+            &[Event::Retract {
+                claim_key: crate::engine::merge_key(&alias, &canonical),
+            }],
+            &scopes(),
+            102,
+        );
         // un-merged: re-keyed back under a, name registry intact
-        assert!(e.views().by_entity.get(&("p".into(), "a".into())).unwrap().contains("about-a"));
+        assert!(
+            e.views()
+                .by_entity
+                .get(&("p".into(), "a".into()))
+                .unwrap()
+                .contains("about-a")
+        );
         let es = entity_state(e.views(), Some(ENTITY_STATE_ROWS));
-        let (_, display, rows) = es.iter().find(|(k, _, _)| k == &("p".to_string(), "a".to_string())).unwrap();
+        let (_, display, rows) = es
+            .iter()
+            .find(|(k, _, _)| k == &("p".to_string(), "a".to_string()))
+            .unwrap();
         assert_eq!(display, "Aye");
         assert_eq!(rows.len(), 0); // no subject_key -> no believed rows
     }
@@ -662,12 +895,31 @@ mod tests {
     #[test]
     fn u_alias_3_retracting_a_flattening_merge_restores_the_earlier_edge() {
         let mut e = NaiveEngine::new(cfg());
-        e.apply(&[merge(("p", "a"), ("p", "b")), merge(("p", "b"), ("p", "c"))], &scopes(), 100);
-        assert_eq!(e.views().aliases.resolve(&("p".into(), "a".into())), ("p".into(), "c".into()));
+        e.apply(
+            &[merge(("p", "a"), ("p", "b")), merge(("p", "b"), ("p", "c"))],
+            &scopes(),
+            100,
+        );
+        assert_eq!(
+            e.views().aliases.resolve(&("p".into(), "a".into())),
+            ("p".into(), "c".into())
+        );
 
-        e.apply(&[Event::Retract { claim_key: "clog:merge:p:b->p:c".into() }], &scopes(), 101);
-        assert_eq!(e.views().aliases.resolve(&("p".into(), "a".into())), ("p".into(), "b".into()));
-        assert_eq!(e.views().aliases.resolve(&("p".into(), "b".into())), ("p".into(), "b".into()));
+        e.apply(
+            &[Event::Retract {
+                claim_key: "clog:merge:p:b->p:c".into(),
+            }],
+            &scopes(),
+            101,
+        );
+        assert_eq!(
+            e.views().aliases.resolve(&("p".into(), "a".into())),
+            ("p".into(), "b".into())
+        );
+        assert_eq!(
+            e.views().aliases.resolve(&("p".into(), "b".into())),
+            ("p".into(), "b".into())
+        );
     }
 
     // Ruling A, case 2: two live merge claims can name the same alias. The
@@ -678,14 +930,46 @@ mod tests {
         let mut e = NaiveEngine::new(cfg());
         let mut c = tests_base_claim();
         c.claim_key = "about-a".into();
-        c.entities = vec![EntityRef { etype: "p".into(), id: "a".into(), name: None }];
-        e.apply(&[Event::Observe(StoredClaim { claim: c, recorded_at: 1 }),
-                  merge(("p", "a"), ("p", "b")), merge(("p", "a"), ("p", "c"))], &scopes(), 100);
-        assert_eq!(e.views().aliases.resolve(&("p".into(), "a".into())), ("p".into(), "c".into()));
+        c.entities = vec![EntityRef {
+            etype: "p".into(),
+            id: "a".into(),
+            name: None,
+        }];
+        e.apply(
+            &[
+                Event::Observe(StoredClaim {
+                    claim: c,
+                    recorded_at: 1,
+                }),
+                merge(("p", "a"), ("p", "b")),
+                merge(("p", "a"), ("p", "c")),
+            ],
+            &scopes(),
+            100,
+        );
+        assert_eq!(
+            e.views().aliases.resolve(&("p".into(), "a".into())),
+            ("p".into(), "c".into())
+        );
 
-        e.apply(&[Event::Retract { claim_key: "clog:merge:p:a->p:c".into() }], &scopes(), 101);
-        assert_eq!(e.views().aliases.resolve(&("p".into(), "a".into())), ("p".into(), "b".into()));
-        assert!(e.views().by_entity.get(&("p".into(), "b".into())).unwrap().contains("about-a"));
+        e.apply(
+            &[Event::Retract {
+                claim_key: "clog:merge:p:a->p:c".into(),
+            }],
+            &scopes(),
+            101,
+        );
+        assert_eq!(
+            e.views().aliases.resolve(&("p".into(), "a".into())),
+            ("p".into(), "b".into())
+        );
+        assert!(
+            e.views()
+                .by_entity
+                .get(&("p".into(), "b".into()))
+                .unwrap()
+                .contains("about-a")
+        );
         assert!(e.views().by_entity.get(&("p".into(), "a".into())).is_none());
     }
 
@@ -696,28 +980,65 @@ mod tests {
         let mut e = NaiveEngine::new(cfg());
         let mut c = tests_base_claim();
         c.claim_key = "about-a".into();
-        c.entities = vec![EntityRef { etype: "p".into(), id: "a".into(), name: None }];
-        let ent = |id: &str| EntityRef { etype: "p".into(), id: id.into(), name: None };
+        c.entities = vec![EntityRef {
+            etype: "p".into(),
+            id: "a".into(),
+            name: None,
+        }];
+        let ent = |id: &str| EntityRef {
+            etype: "p".into(),
+            id: id.into(),
+            name: None,
+        };
         let scopes = BTreeMap::from([
             ("plain".to_string(), Focus::uniform()),
             ("alias".to_string(), Focus::uniform().boost(ent("a"), 3.0)),
-            ("canonical".to_string(), Focus::uniform().boost(ent("b"), 3.0)),
+            (
+                "canonical".to_string(),
+                Focus::uniform().boost(ent("b"), 3.0),
+            ),
         ]);
-        e.apply(&[Event::Observe(StoredClaim { claim: c, recorded_at: 1 }), merge(("p", "a"), ("p", "b"))], &scopes, 100);
+        e.apply(
+            &[
+                Event::Observe(StoredClaim {
+                    claim: c,
+                    recorded_at: 1,
+                }),
+                merge(("p", "a"), ("p", "b")),
+            ],
+            &scopes,
+            100,
+        );
 
         let score = |scope: &str| {
-            e.views().urgent.get(scope).unwrap().iter().find(|(_, k)| k == "about-a").unwrap().0
+            e.views()
+                .urgent
+                .get(scope)
+                .unwrap()
+                .iter()
+                .find(|(_, k)| k == "about-a")
+                .unwrap()
+                .0
         };
         let plain = score("plain");
         assert!(plain > 0.0);
-        assert!((score("alias") - plain * 3.0).abs() < 1e-6, "{} vs {}", score("alias"), plain * 3.0);
+        assert!(
+            (score("alias") - plain * 3.0).abs() < 1e-6,
+            "{} vs {}",
+            score("alias"),
+            plain * 3.0
+        );
         assert!((score("canonical") - plain * 3.0).abs() < 1e-6);
     }
 
     #[test]
     fn entity_state_newest_first_capped() {
         let mut e = NaiveEngine::new(cfg());
-        let ent = EntityRef { etype: "proj".into(), id: "h".into(), name: None };
+        let ent = EntityRef {
+            etype: "proj".into(),
+            id: "h".into(),
+            name: None,
+        };
         let mut evs = vec![];
         for i in 0..10 {
             let mut c = tests_base_claim();
@@ -725,7 +1046,10 @@ mod tests {
             c.subject_key = Some(format!("s{i}"));
             c.occurred_at = 100 + i;
             c.entities = vec![ent.clone()];
-            evs.push(Event::Observe(StoredClaim { claim: c, recorded_at: 1 }));
+            evs.push(Event::Observe(StoredClaim {
+                claim: c,
+                recorded_at: 1,
+            }));
         }
         e.apply(&evs, &scopes(), 1000);
         let es = entity_state(e.views(), Some(ENTITY_STATE_ROWS));
@@ -740,21 +1064,47 @@ mod tests {
     #[test]
     fn entity_state_reports_believed_rows_under_the_canonical_entity() {
         let mut e = NaiveEngine::new(cfg());
-        let ent = |id: &str| EntityRef { etype: "p".into(), id: id.into(), name: None };
+        let ent = |id: &str| EntityRef {
+            etype: "p".into(),
+            id: id.into(),
+            name: None,
+        };
         let mut old = tests_base_claim();
-        old.claim_key = "old".into(); old.subject_key = Some("s1".into()); old.occurred_at = 100;
+        old.claim_key = "old".into();
+        old.subject_key = Some("s1".into());
+        old.occurred_at = 100;
         old.entities = vec![ent("a")];
         let mut new = tests_base_claim();
-        new.claim_key = "new".into(); new.subject_key = Some("s1".into()); new.occurred_at = 200;
+        new.claim_key = "new".into();
+        new.subject_key = Some("s1".into());
+        new.occurred_at = 200;
         new.entities = vec![ent("a")];
-        e.apply(&[Event::Observe(StoredClaim { claim: old, recorded_at: 1 }),
-                  Event::Observe(StoredClaim { claim: new, recorded_at: 2 })], &scopes(), 1000);
+        e.apply(
+            &[
+                Event::Observe(StoredClaim {
+                    claim: old,
+                    recorded_at: 1,
+                }),
+                Event::Observe(StoredClaim {
+                    claim: new,
+                    recorded_at: 2,
+                }),
+            ],
+            &scopes(),
+            1000,
+        );
         let es = entity_state(e.views(), Some(ENTITY_STATE_ROWS));
         assert_eq!(es.len(), 1);
         assert_eq!(es[0].0, ("p".to_string(), "a".to_string()));
         // one row per subject: the believed claim, not the losing one
-        assert_eq!(es[0].2.iter().map(|(s, sc)| (s.as_str(), sc.claim.claim_key.as_str())).collect::<Vec<_>>(),
-                   vec![("s1", "new")]);
+        assert_eq!(
+            es[0]
+                .2
+                .iter()
+                .map(|(s, sc)| (s.as_str(), sc.claim.claim_key.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("s1", "new")]
+        );
 
         e.apply(&[merge(("p", "a"), ("p", "b"))], &scopes(), 1001);
         let es = entity_state(e.views(), Some(ENTITY_STATE_ROWS));

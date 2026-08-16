@@ -175,7 +175,14 @@ pub(crate) fn render(t: &Template, inputs: &SlotInputs, budget_chars: usize) -> 
     let open_loop_lines: Vec<String> = inputs
         .open_loops
         .iter()
-        .map(|l| format!("- {} {} ({})", l.kind.to_uppercase(), l.headline, l.claim_key))
+        .map(|l| {
+            format!(
+                "- {} {} ({})",
+                l.kind.to_uppercase(),
+                l.headline,
+                l.claim_key
+            )
+        })
         .collect();
     let entity_lines: Vec<String> = inputs
         .entities
@@ -192,13 +199,23 @@ pub(crate) fn render(t: &Template, inputs: &SlotInputs, budget_chars: usize) -> 
         .collect();
 
     let mut urgent_state = SlotState::new(urgent_lines, configured_limit(t, SlotName::Urgent));
-    let mut open_loops_state = SlotState::new(open_loop_lines, configured_limit(t, SlotName::OpenLoops));
+    let mut open_loops_state =
+        SlotState::new(open_loop_lines, configured_limit(t, SlotName::OpenLoops));
     let mut entities_state = SlotState::new(entity_lines, configured_limit(t, SlotName::Entities));
     let mut changes_state = SlotState::new(change_lines, configured_limit(t, SlotName::Changes));
 
-    let header_line = format!("{} · rev {} · {}", inputs.scope, inputs.rev, rfc3339_utc(inputs.as_of_ms));
+    let header_line = format!(
+        "{} · rev {} · {}",
+        inputs.scope,
+        inputs.rev,
+        rfc3339_utc(inputs.as_of_ms)
+    );
 
-    let build = |urgent: &SlotState, open_loops: &SlotState, entities: &SlotState, changes: &SlotState| -> String {
+    let build = |urgent: &SlotState,
+                 open_loops: &SlotState,
+                 entities: &SlotState,
+                 changes: &SlotState|
+     -> String {
         let mut out = String::new();
         for seg in &t.0 {
             match seg {
@@ -218,7 +235,12 @@ pub(crate) fn render(t: &Template, inputs: &SlotInputs, budget_chars: usize) -> 
         out
     };
 
-    let mut current = build(&urgent_state, &open_loops_state, &entities_state, &changes_state);
+    let mut current = build(
+        &urgent_state,
+        &open_loops_state,
+        &entities_state,
+        &changes_state,
+    );
 
     while current.chars().count() > budget_chars {
         let dropped = changes_state.drop_one()
@@ -228,7 +250,12 @@ pub(crate) fn render(t: &Template, inputs: &SlotInputs, budget_chars: usize) -> 
         if !dropped {
             break;
         }
-        current = build(&urgent_state, &open_loops_state, &entities_state, &changes_state);
+        current = build(
+            &urgent_state,
+            &open_loops_state,
+            &entities_state,
+            &changes_state,
+        );
     }
 
     current
@@ -237,7 +264,7 @@ pub(crate) fn render(t: &Template, inputs: &SlotInputs, budget_chars: usize) -> 
 #[cfg(test)]
 mod render_tests {
     use super::*;
-    use crate::render::template::{parse, DEFAULT_TEMPLATE};
+    use crate::render::template::{DEFAULT_TEMPLATE, parse};
 
     fn inputs() -> SlotInputs {
         SlotInputs {
@@ -269,7 +296,10 @@ mod render_tests {
                 display: "Halcyon".into(),
                 summaries: vec!["paid".into(), "kicked off".into()],
             }],
-            changes: vec![ChangeItem::Added("Invoice 1042 overdue".into()), ChangeItem::Removed("old thing".into())],
+            changes: vec![
+                ChangeItem::Added("Invoice 1042 overdue".into()),
+                ChangeItem::Removed("old thing".into()),
+            ],
         }
     }
 

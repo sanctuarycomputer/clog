@@ -29,10 +29,12 @@ impl Wal {
     /// `self`'s policy afterwards (`OnCommit` calls `sync_data`; `Never`
     /// does not sync).
     pub(crate) fn append(&mut self, batch: &Batch) -> Result<(), ClogError> {
-        let payload = postcard::to_allocvec(batch)
-            .map_err(|e| ClogError::Corrupt { detail: format!("wal encode: {e}") })?;
-        let len = u32::try_from(payload.len())
-            .map_err(|_| ClogError::Corrupt { detail: "wal record too large".to_string() })?;
+        let payload = postcard::to_allocvec(batch).map_err(|e| ClogError::Corrupt {
+            detail: format!("wal encode: {e}"),
+        })?;
+        let len = u32::try_from(payload.len()).map_err(|_| ClogError::Corrupt {
+            detail: "wal record too large".to_string(),
+        })?;
         let crc = crc32fast::hash(&payload);
 
         let mut frame = Vec::with_capacity(HEADER_LEN + payload.len());
@@ -79,7 +81,11 @@ pub(crate) fn open_dir(dir: &Path, fsync: FsyncPolicy) -> Result<(Wal, Vec<Batch
     fs::create_dir_all(&wal_dir)?;
     let log_path = wal_dir.join("log");
 
-    let bytes = if log_path.exists() { fs::read(&log_path)? } else { Vec::new() };
+    let bytes = if log_path.exists() {
+        fs::read(&log_path)?
+    } else {
+        Vec::new()
+    };
     let (batches, good_len) = replay(&bytes)?;
 
     if good_len < bytes.len() {
@@ -90,7 +96,10 @@ pub(crate) fn open_dir(dir: &Path, fsync: FsyncPolicy) -> Result<(Wal, Vec<Batch
         trunc.set_len(good_len as u64)?;
     }
 
-    let file = OpenOptions::new().create(true).append(true).open(&log_path)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
     sync_dir(&wal_dir);
     Ok((Wal { file, fsync }, batches))
 }
@@ -155,7 +164,10 @@ fn replay(bytes: &[u8]) -> Result<(Vec<Batch>, usize), ClogError> {
             Ok(batch) => {
                 if batch.rev <= last_rev {
                     return Err(ClogError::Corrupt {
-                        detail: format!("wal rev not strictly increasing: {} after {last_rev}", batch.rev),
+                        detail: format!(
+                            "wal rev not strictly increasing: {} after {last_rev}",
+                            batch.rev
+                        ),
                     });
                 }
                 last_rev = batch.rev;
@@ -173,7 +185,10 @@ fn replay(bytes: &[u8]) -> Result<(Vec<Batch>, usize), ClogError> {
 
 /// Appends `tail` to `wal_dir/wal.corrupt`, creating the file if needed.
 fn quarantine(wal_dir: &Path, tail: &[u8]) -> Result<(), ClogError> {
-    let mut f = OpenOptions::new().create(true).append(true).open(wal_dir.join("wal.corrupt"))?;
+    let mut f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(wal_dir.join("wal.corrupt"))?;
     f.write_all(tail)?;
     Ok(())
 }
@@ -184,7 +199,11 @@ mod tests {
     use crate::engine::{Batch, Event};
 
     fn batch(rev: u64) -> Batch {
-        Batch { rev, as_of: 1_000 * rev, events: vec![Event::Tick { epoch: rev }] }
+        Batch {
+            rev,
+            as_of: 1_000 * rev,
+            events: vec![Event::Tick { epoch: rev }],
+        }
     }
 
     #[test]
@@ -222,7 +241,10 @@ mod tests {
             w.append(&batch(2)).unwrap();
         }
         let (_, replayed) = open_dir(dir.path(), crate::FsyncPolicy::OnCommit).unwrap();
-        assert_eq!(replayed.iter().map(|b| b.rev).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(
+            replayed.iter().map(|b| b.rev).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
     }
 
     #[test]
@@ -254,7 +276,10 @@ mod tests {
             w.append(&batch(1)).unwrap();
             w.append(&batch(1)).unwrap(); // same rev twice: impossible for one writer
         }
-        assert!(matches!(open_dir(dir.path(), crate::FsyncPolicy::OnCommit), Err(ClogError::Corrupt { .. })));
+        assert!(matches!(
+            open_dir(dir.path(), crate::FsyncPolicy::OnCommit),
+            Err(ClogError::Corrupt { .. })
+        ));
 
         // rev 0 is likewise impossible: the first committed batch is rev 1.
         let dir = tempfile::tempdir().unwrap();
@@ -262,7 +287,10 @@ mod tests {
             let (mut w, _) = open_dir(dir.path(), crate::FsyncPolicy::OnCommit).unwrap();
             w.append(&batch(0)).unwrap();
         }
-        assert!(matches!(open_dir(dir.path(), crate::FsyncPolicy::OnCommit), Err(ClogError::Corrupt { .. })));
+        assert!(matches!(
+            open_dir(dir.path(), crate::FsyncPolicy::OnCommit),
+            Err(ClogError::Corrupt { .. })
+        ));
     }
 
     #[test]

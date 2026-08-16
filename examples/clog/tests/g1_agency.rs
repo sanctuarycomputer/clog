@@ -27,7 +27,10 @@ fn day(n: u64) -> u64 {
 /// see the comment at its declaration), Manual clock.
 fn fixture_config(dir: &std::path::Path) -> Config {
     let mut c = Config::default_for(dir);
-    c.tick = TickConfig { mode: ClockMode::Manual, interval_ms: 60_000 };
+    c.tick = TickConfig {
+        mode: ClockMode::Manual,
+        interval_ms: 60_000,
+    };
 
     c.scopes.insert(
         "delivery-health".into(),
@@ -35,28 +38,50 @@ fn fixture_config(dir: &std::path::Path) -> Config {
             .weight("risk", 2.5)
             .weight("question", 1.5)
             .weight("commitment", 1.5)
-            .boost(EntityRef { etype: "project".into(), id: "halcyon".into(), name: None }, 1.5),
+            .boost(
+                EntityRef {
+                    etype: "project".into(),
+                    id: "halcyon".into(),
+                    name: None,
+                },
+                1.5,
+            ),
     );
     c.scopes.insert(
         "cash-and-collections".into(),
-        Focus::uniform().weight("risk", 2.0).weight("fyi", 0.5).weight("opportunity", 1.5),
+        Focus::uniform()
+            .weight("risk", 2.0)
+            .weight("fyi", 0.5)
+            .weight("opportunity", 1.5),
     );
 
     for kd in &mut c.kinds.kinds {
         match kd.name.as_str() {
             "risk" => kd.rules.push(Rule {
-                any_of: vec![Matcher::BodyContains("overdue".into()), Matcher::BodyContains("slipping".into())],
+                any_of: vec![
+                    Matcher::BodyContains("overdue".into()),
+                    Matcher::BodyContains("slipping".into()),
+                ],
             }),
-            "question" => kd.rules.push(Rule { any_of: vec![Matcher::BodyRegex(r"\?$".into())] }),
-            "fact" => kd.rules.push(Rule { any_of: vec![Matcher::ObserverIs("bank-feed".into())] }),
-            "opportunity" => kd.rules.push(Rule { any_of: vec![Matcher::BodyContains("inbound".into())] }),
+            "question" => kd.rules.push(Rule {
+                any_of: vec![Matcher::BodyRegex(r"\?$".into())],
+            }),
+            "fact" => kd.rules.push(Rule {
+                any_of: vec![Matcher::ObserverIs("bank-feed".into())],
+            }),
+            "opportunity" => kd.rules.push(Rule {
+                any_of: vec![Matcher::BodyContains("inbound".into())],
+            }),
             // Beyond the brief's four required rules: without this, claims
             // 5/6/11 (a kickoff move, a PTO note, a moved 1:1) all land in
             // `Unclassified`, and cash-and-collections' `fyi = 0.5` damping
             // — part of this fixture's required story — would never be
             // exercised by any live claim. Documented in task-17-report.md.
             "fyi" => kd.rules.push(Rule {
-                any_of: vec![Matcher::BodyContains("moved".into()), Matcher::BodyContains("PTO".into())],
+                any_of: vec![
+                    Matcher::BodyContains("moved".into()),
+                    Matcher::BodyContains("PTO".into()),
+                ],
             }),
             _ => {}
         }
@@ -92,13 +117,25 @@ fn claim(
 }
 
 fn halcyon() -> EntityRef {
-    EntityRef { etype: "project".into(), id: "halcyon".into(), name: Some("Halcyon".into()) }
+    EntityRef {
+        etype: "project".into(),
+        id: "halcyon".into(),
+        name: Some("Halcyon".into()),
+    }
 }
 fn samuel() -> EntityRef {
-    EntityRef { etype: "person".into(), id: "samuel".into(), name: Some("Samuel".into()) }
+    EntityRef {
+        etype: "person".into(),
+        id: "samuel".into(),
+        name: Some("Samuel".into()),
+    }
 }
 fn sam() -> EntityRef {
-    EntityRef { etype: "person".into(), id: "sam".into(), name: Some("Sam".into()) }
+    EntityRef {
+        etype: "person".into(),
+        id: "sam".into(),
+        name: Some("Sam".into()),
+    }
 }
 
 fn unclassified_keys(c: &Clog) -> String {
@@ -200,8 +237,16 @@ fn g1_agency_simulation() {
     )
     .unwrap();
 
-    insta::assert_snapshot!("g1_a_delivery", c.situation(Some("delivery-health"), None).unwrap().text);
-    insta::assert_snapshot!("g1_a_cash", c.situation(Some("cash-and-collections"), None).unwrap().text);
+    insta::assert_snapshot!(
+        "g1_a_delivery",
+        c.situation(Some("delivery-health"), None).unwrap().text
+    );
+    insta::assert_snapshot!(
+        "g1_a_cash",
+        c.situation(Some("cash-and-collections"), None)
+            .unwrap()
+            .text
+    );
     insta::assert_snapshot!("g1_a_unclassified", unclassified_keys(&c));
 
     // ======================================================================
@@ -241,26 +286,56 @@ fn g1_agency_simulation() {
     )
     .unwrap();
 
-    insta::assert_snapshot!("g1_b_delivery", c.situation(Some("delivery-health"), None).unwrap().text);
-    insta::assert_snapshot!("g1_b_cash", c.situation(Some("cash-and-collections"), None).unwrap().text);
+    insta::assert_snapshot!(
+        "g1_b_delivery",
+        c.situation(Some("delivery-health"), None).unwrap().text
+    );
+    insta::assert_snapshot!(
+        "g1_b_cash",
+        c.situation(Some("cash-and-collections"), None)
+            .unwrap()
+            .text
+    );
     insta::assert_snapshot!("g1_b_unclassified", unclassified_keys(&c));
 
     // `EntityState` reports only believed winners: the deliverable (its
     // subject's only claim) and claim 3 (the invoice's current winner).
-    let entity_state_rows =
-        c.select(View::EntityState, Filter { entities: Some(vec![halcyon()]), ..Filter::default() }).unwrap();
+    let entity_state_rows = c
+        .select(
+            View::EntityState,
+            Filter {
+                entities: Some(vec![halcyon()]),
+                ..Filter::default()
+            },
+        )
+        .unwrap();
     assert_eq!(
-        entity_state_rows.iter().map(|r| (r.claim.claim_key.as_str(), r.believed)).collect::<Vec<_>>(),
-        vec![("halcyon:deliverable:slip", Some(true)), ("halcyon:inv-1042:v2", Some(true))],
+        entity_state_rows
+            .iter()
+            .map(|r| (r.claim.claim_key.as_str(), r.believed))
+            .collect::<Vec<_>>(),
+        vec![
+            ("halcyon:deliverable:slip", Some(true)),
+            ("halcyon:inv-1042:v2", Some(true))
+        ],
     );
     // `Live` shows every competitor for the invoice subject with its flag:
     // claim 3 (later occurred_at) beats both claim 2 and the far-better-
     // trusted claim 4.
     let live_rows = c
-        .select(View::Live, Filter { subject_prefix: Some("halcyon:inv-1042:".into()), ..Filter::default() })
+        .select(
+            View::Live,
+            Filter {
+                subject_prefix: Some("halcyon:inv-1042:".into()),
+                ..Filter::default()
+            },
+        )
         .unwrap();
     assert_eq!(
-        live_rows.iter().map(|r| (r.claim.claim_key.as_str(), r.believed)).collect::<Vec<_>>(),
+        live_rows
+            .iter()
+            .map(|r| (r.claim.claim_key.as_str(), r.believed))
+            .collect::<Vec<_>>(),
         vec![
             ("halcyon:inv-1042:paid", Some(false)),
             ("halcyon:inv-1042:v1", Some(false)),
@@ -294,15 +369,32 @@ fn g1_agency_simulation() {
     c.retract("meridian:question:sow").unwrap();
     c.retract("halcyon:inv-1042:v2").unwrap();
 
-    insta::assert_snapshot!("g1_c_delivery", c.situation(Some("delivery-health"), None).unwrap().text);
-    insta::assert_snapshot!("g1_c_cash", c.situation(Some("cash-and-collections"), None).unwrap().text);
+    insta::assert_snapshot!(
+        "g1_c_delivery",
+        c.situation(Some("delivery-health"), None).unwrap().text
+    );
+    insta::assert_snapshot!(
+        "g1_c_cash",
+        c.situation(Some("cash-and-collections"), None)
+            .unwrap()
+            .text
+    );
     insta::assert_snapshot!("g1_c_unclassified", unclassified_keys(&c));
 
     let healed = c
-        .select(View::EntityState, Filter { entities: Some(vec![halcyon()]), ..Filter::default() })
+        .select(
+            View::EntityState,
+            Filter {
+                entities: Some(vec![halcyon()]),
+                ..Filter::default()
+            },
+        )
         .unwrap();
     assert_eq!(
-        healed.iter().map(|r| r.claim.claim_key.as_str()).collect::<Vec<_>>(),
+        healed
+            .iter()
+            .map(|r| r.claim.claim_key.as_str())
+            .collect::<Vec<_>>(),
         vec!["halcyon:deliverable:slip", "halcyon:inv-1042:paid"],
         "belief must flip to the bank-feed claim once the fresher-but-wrong claim 3 is retracted",
     );
@@ -315,8 +407,16 @@ fn g1_agency_simulation() {
     c.advance(day(2)).unwrap(); // now = day 20_010
     c.merge_entities(&samuel(), &sam()).unwrap();
 
-    insta::assert_snapshot!("g1_d_delivery", c.situation(Some("delivery-health"), None).unwrap().text);
-    insta::assert_snapshot!("g1_d_cash", c.situation(Some("cash-and-collections"), None).unwrap().text);
+    insta::assert_snapshot!(
+        "g1_d_delivery",
+        c.situation(Some("delivery-health"), None).unwrap().text
+    );
+    insta::assert_snapshot!(
+        "g1_d_cash",
+        c.situation(Some("cash-and-collections"), None)
+            .unwrap()
+            .text
+    );
     insta::assert_snapshot!("g1_d_unclassified", unclassified_keys(&c));
 
     // `EntityState` orders rows (canonical entity, subject) ascending:
@@ -324,9 +424,20 @@ fn g1_agency_simulation() {
     // so claim 6 (the PTO note) sorts before claim 11 even though claim 11
     // occurred later — this is `select`'s subject-key order, not the
     // newest-first order the *rendered* entities slot uses.
-    let merged = c.select(View::EntityState, Filter { entities: Some(vec![sam()]), ..Filter::default() }).unwrap();
+    let merged = c
+        .select(
+            View::EntityState,
+            Filter {
+                entities: Some(vec![sam()]),
+                ..Filter::default()
+            },
+        )
+        .unwrap();
     assert_eq!(
-        merged.iter().map(|r| r.claim.claim_key.as_str()).collect::<Vec<_>>(),
+        merged
+            .iter()
+            .map(|r| r.claim.claim_key.as_str())
+            .collect::<Vec<_>>(),
         vec!["meridian:pto:sam", "meridian:sam:oneone"],
         "both person:samuel's and person:sam's believed claims now group under one canonical entity"
     );

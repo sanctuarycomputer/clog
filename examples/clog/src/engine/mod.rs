@@ -40,7 +40,10 @@ pub(crate) const MERGE_SEP: char = '\u{1f}';
 /// This key is the merge's public handle — retracting it is how a host
 /// un-merges (spec §5.2) — so it is built here and nowhere else.
 pub(crate) fn merge_key(alias: &EntityKey, canonical: &EntityKey) -> String {
-    format!("{MERGE_PREFIX}{}:{}->{}:{}", alias.0, alias.1, canonical.0, canonical.1)
+    format!(
+        "{MERGE_PREFIX}{}:{}->{}:{}",
+        alias.0, alias.1, canonical.0, canonical.1
+    )
 }
 
 /// The `body` of that claim: the four entity fields joined with
@@ -181,7 +184,12 @@ pub(crate) trait Engine: Send {
     /// Applies `events` to the materialized views, using `scopes` to
     /// recompute per-scope derived state (e.g. `urgent`) and `now_ms` as the
     /// clock for recency-sensitive computations.
-    fn apply(&mut self, events: &[Event], scopes: &BTreeMap<String, Focus>, now_ms: u64) -> ApplyResult;
+    fn apply(
+        &mut self,
+        events: &[Event],
+        scopes: &BTreeMap<String, Focus>,
+        now_ms: u64,
+    ) -> ApplyResult;
     /// Borrows the current materialized-view snapshot.
     fn views(&self) -> &WorldViews;
 }
@@ -197,9 +205,19 @@ mod tests {
             rev: 3,
             as_of: 1_700_000_000_000,
             events: vec![
-                Event::Observe(StoredClaim { claim: tests_base_claim(), recorded_at: 9 }),
-                Event::Retract { claim_key: "k1".into() },
-                Event::Judge { claim_key: "k1".into(), kind: "risk".into(), confidence: 1.0, source: crate::JudgeSource::Rule },
+                Event::Observe(StoredClaim {
+                    claim: tests_base_claim(),
+                    recorded_at: 9,
+                }),
+                Event::Retract {
+                    claim_key: "k1".into(),
+                },
+                Event::Judge {
+                    claim_key: "k1".into(),
+                    kind: "risk".into(),
+                    confidence: 1.0,
+                    source: crate::JudgeSource::Rule,
+                },
                 Event::Tick { epoch: 4 },
             ],
         };

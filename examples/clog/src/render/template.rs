@@ -97,9 +97,9 @@ pub(crate) fn parse(src: &str) -> Result<Template, ClogError> {
                     segments.push(Segment::Text(rest[..start].to_string()));
                 }
                 let after_open = &rest[start + 2..];
-                let close = after_open
-                    .find('}')
-                    .ok_or_else(|| ClogError::TemplateError("unterminated slot: missing '}'".to_string()))?;
+                let close = after_open.find('}').ok_or_else(|| {
+                    ClogError::TemplateError("unterminated slot: missing '}'".to_string())
+                })?;
                 let body = &after_open[..close];
                 segments.push(parse_slot(body)?);
                 rest = &after_open[close + 1..];
@@ -121,20 +121,28 @@ fn parse_slot(body: &str) -> Result<Segment, ClogError> {
         "open_loops" => SlotName::OpenLoops,
         "entities" => SlotName::Entities,
         "changes" => SlotName::Changes,
-        other => return Err(ClogError::TemplateError(format!("unknown slot name {other:?}"))),
+        other => {
+            return Err(ClogError::TemplateError(format!(
+                "unknown slot name {other:?}"
+            )));
+        }
     };
 
     let mut limit = None;
     for tok in tokens {
-        let (key, value) = tok
-            .split_once('=')
-            .ok_or_else(|| ClogError::TemplateError(format!("malformed slot argument {tok:?}: expected key=value")))?;
+        let (key, value) = tok.split_once('=').ok_or_else(|| {
+            ClogError::TemplateError(format!(
+                "malformed slot argument {tok:?}: expected key=value"
+            ))
+        })?;
         if key != "limit" {
-            return Err(ClogError::TemplateError(format!("unknown slot key {key:?}")));
+            return Err(ClogError::TemplateError(format!(
+                "unknown slot key {key:?}"
+            )));
         }
-        let parsed = value
-            .parse::<usize>()
-            .map_err(|_| ClogError::TemplateError(format!("invalid limit value {value:?}: expected a usize")))?;
+        let parsed = value.parse::<usize>().map_err(|_| {
+            ClogError::TemplateError(format!("invalid limit value {value:?}: expected a usize"))
+        })?;
         limit = Some(parsed);
     }
 
@@ -154,7 +162,13 @@ mod tests {
         assert!(parse("%{entities limit=10}%{changes limit=6}").is_ok());
         // slot with limit parses the value
         let t = parse("%{urgent limit=3}").unwrap();
-        assert!(matches!(&t.0[0], Segment::Slot { name: SlotName::Urgent, limit: Some(3) }));
+        assert!(matches!(
+            &t.0[0],
+            Segment::Slot {
+                name: SlotName::Urgent,
+                limit: Some(3)
+            }
+        ));
         // rejects
         for bad in [
             "%{nope}",             // unknown slot name
@@ -164,7 +178,10 @@ mod tests {
             "%{urgent size=3}",    // unknown key
             "%{}",                 // empty slot
         ] {
-            assert!(matches!(parse(bad), Err(crate::ClogError::TemplateError(_))), "{bad}");
+            assert!(
+                matches!(parse(bad), Err(crate::ClogError::TemplateError(_))),
+                "{bad}"
+            );
         }
     }
 

@@ -71,8 +71,9 @@ pub(crate) fn compile(tax: &KindTaxonomy) -> Result<RuleSet, ClogError> {
         Ok(match m {
             Matcher::BodyContains(s) => CompiledMatcher::BodyContains(s.to_lowercase()),
             Matcher::BodyRegex(pat) => {
-                let re = Regex::new(pat)
-                    .map_err(|e| ClogError::Corrupt { detail: format!("config: bad regex {pat:?}: {e}") })?;
+                let re = Regex::new(pat).map_err(|e| ClogError::Corrupt {
+                    detail: format!("config: bad regex {pat:?}: {e}"),
+                })?;
                 CompiledMatcher::BodyRegex(re)
             }
             Matcher::ObserverIs(s) => CompiledMatcher::ObserverIs(s.clone()),
@@ -81,7 +82,11 @@ pub(crate) fn compile(tax: &KindTaxonomy) -> Result<RuleSet, ClogError> {
     }
 
     fn compile_rule(r: &Rule) -> Result<CompiledRule, ClogError> {
-        let any_of = r.any_of.iter().map(compile_matcher).collect::<Result<Vec<_>, _>>()?;
+        let any_of = r
+            .any_of
+            .iter()
+            .map(compile_matcher)
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(CompiledRule { any_of })
     }
 
@@ -89,7 +94,11 @@ pub(crate) fn compile(tax: &KindTaxonomy) -> Result<RuleSet, ClogError> {
         .kinds
         .iter()
         .map(|kd| -> Result<(String, Vec<CompiledRule>), ClogError> {
-            let rules = kd.rules.iter().map(compile_rule).collect::<Result<Vec<_>, _>>()?;
+            let rules = kd
+                .rules
+                .iter()
+                .map(compile_rule)
+                .collect::<Result<Vec<_>, _>>()?;
             Ok((kd.name.clone(), rules))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -107,7 +116,11 @@ pub(crate) fn classify(rs: &RuleSet, c: &Claim) -> Option<KindLabel> {
     for (kind, rules) in &rs.kinds {
         for rule in rules {
             if rule.matches(c) {
-                return Some(KindLabel { kind: kind.clone(), confidence: 1.0, source: JudgeSource::Rule });
+                return Some(KindLabel {
+                    kind: kind.clone(),
+                    confidence: 1.0,
+                    source: JudgeSource::Rule,
+                });
             }
         }
     }
@@ -126,12 +139,18 @@ mod tests {
         // fact, decision, risk, question, ... — rules are evaluated in config order.
         for kd in &mut tax.kinds {
             match kd.name.as_str() {
-                "risk" => kd.rules.push(Rule { any_of: vec![Matcher::BodyContains("overdue".into())] }),
-                "question" => kd.rules.push(Rule { any_of: vec![
-                    Matcher::BodyRegex(r"\?$".into()),
-                    Matcher::ObserverIs("faq-bot".into()),
-                ] }),
-                "fact" => kd.rules.push(Rule { any_of: vec![Matcher::EntityType("bankfeed".into())] }),
+                "risk" => kd.rules.push(Rule {
+                    any_of: vec![Matcher::BodyContains("overdue".into())],
+                }),
+                "question" => kd.rules.push(Rule {
+                    any_of: vec![
+                        Matcher::BodyRegex(r"\?$".into()),
+                        Matcher::ObserverIs("faq-bot".into()),
+                    ],
+                }),
+                "fact" => kd.rules.push(Rule {
+                    any_of: vec![Matcher::EntityType("bankfeed".into())],
+                }),
                 _ => {}
             }
         }
@@ -144,7 +163,11 @@ mod tests {
         let mut c = tests_base_claim();
         // matches BOTH fact (entity type) and risk (body) -> fact wins (declared first)
         c.body = "Invoice 1042 is OVERDUE".into();
-        c.entities = vec![EntityRef { etype: "bankfeed".into(), id: "x".into(), name: None }];
+        c.entities = vec![EntityRef {
+            etype: "bankfeed".into(),
+            id: "x".into(),
+            name: None,
+        }];
         let k = classify(&rs, &c).unwrap();
         assert_eq!(k.kind, "fact");
         assert_eq!(k.confidence, 1.0);
@@ -171,7 +194,9 @@ mod tests {
     #[test]
     fn bad_regex_rejected_at_compile() {
         let mut tax = KindTaxonomy::default_taxonomy();
-        tax.kinds[0].rules.push(Rule { any_of: vec![Matcher::BodyRegex("(".into())] });
+        tax.kinds[0].rules.push(Rule {
+            any_of: vec![Matcher::BodyRegex("(".into())],
+        });
         assert!(matches!(compile(&tax), Err(ClogError::Corrupt { .. })));
     }
 }

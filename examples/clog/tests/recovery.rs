@@ -25,7 +25,10 @@ const SCRIPT_LEN: u64 = 4;
 
 fn manual_cfg(dir: &std::path::Path) -> Config {
     let mut c = Config::default_for(dir);
-    c.tick = TickConfig { mode: ClockMode::Manual, interval_ms: 60_000 };
+    c.tick = TickConfig {
+        mode: ClockMode::Manual,
+        interval_ms: 60_000,
+    };
     c
 }
 
@@ -51,16 +54,19 @@ fn claim(key: &str, body: &str) -> Claim {
 fn step(c: &Clog, n: u64) {
     match n {
         1 => {
-            c.observe(vec![claim("a", "first")], ObserveOpts::default()).unwrap();
+            c.observe(vec![claim("a", "first")], ObserveOpts::default())
+                .unwrap();
         }
         2 => {
-            c.observe(vec![claim("b", "second")], ObserveOpts::default()).unwrap();
+            c.observe(vec![claim("b", "second")], ObserveOpts::default())
+                .unwrap();
         }
         3 => {
             c.retract("a").unwrap();
         }
         4 => {
-            c.observe(vec![claim("c", "third")], ObserveOpts::default()).unwrap();
+            c.observe(vec![claim("c", "third")], ObserveOpts::default())
+                .unwrap();
         }
         _ => unreachable!("script has {SCRIPT_LEN} steps, asked for {n}"),
     }
@@ -102,7 +108,10 @@ fn r1_crash_points() {
             .env("CLOG_CRASH_AFTER_WAL", crash_after.to_string())
             .status()
             .unwrap();
-        assert!(!status.success(), "child must abort (crash point {crash_after})");
+        assert!(
+            !status.success(),
+            "child must abort (crash point {crash_after})"
+        );
         // A panicking child would also be "unsuccessful", and would mean the
         // hook never fired — so insist on death by signal, i.e. `abort()`.
         #[cfg(unix)]
@@ -123,7 +132,10 @@ fn r1_crash_points() {
         let fresh_dir = tempfile::tempdir().unwrap();
         let fresh = Clog::open(manual_cfg(fresh_dir.path())).unwrap();
         run_prefix(&fresh, crash_after);
-        let (s1, s2) = (reopened.situation(None, None).unwrap(), fresh.situation(None, None).unwrap());
+        let (s1, s2) = (
+            reopened.situation(None, None).unwrap(),
+            fresh.situation(None, None).unwrap(),
+        );
         assert_eq!(s1.text, s2.text, "crash point {crash_after}");
         assert_eq!(s1.rev, s2.rev, "crash point {crash_after}");
         assert_eq!(s1.as_of, s2.as_of, "crash point {crash_after}");
@@ -132,10 +144,19 @@ fn r1_crash_points() {
         // rev continues from the durable prefix rather than from a gap.
         reopened.advance(2_000_000).unwrap();
         let ack = reopened
-            .observe(vec![claim("post", "after the crash")], ObserveOpts::default())
+            .observe(
+                vec![claim("post", "after the crash")],
+                ObserveOpts::default(),
+            )
             .unwrap();
         assert_eq!(ack.rev, crash_after + 1, "crash point {crash_after}");
-        assert!(reopened.situation(None, None).unwrap().text.contains("after the crash"));
+        assert!(
+            reopened
+                .situation(None, None)
+                .unwrap()
+                .text
+                .contains("after the crash")
+        );
     }
 }
 

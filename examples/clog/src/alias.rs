@@ -29,7 +29,10 @@ impl AliasMap {
     /// Write-time flattening helper: if `canonical` is itself aliased,
     /// returns its target; otherwise returns `canonical` unchanged.
     pub(crate) fn flatten_target(&self, canonical: &EntityKey) -> EntityKey {
-        self.edges.get(canonical).cloned().unwrap_or_else(|| canonical.clone())
+        self.edges
+            .get(canonical)
+            .cloned()
+            .unwrap_or_else(|| canonical.clone())
     }
 
     /// Inserts an alias edge `alias -> canonical`, flattening `canonical`
@@ -38,7 +41,11 @@ impl AliasMap {
     /// `ClogError::AliasCycle` if the flattened target equals `alias`
     /// (covers both reverse edges, e.g. inserting `b -> a` after `a -> b`,
     /// and self-loops, e.g. `z -> z`).
-    pub(crate) fn insert(&mut self, alias: EntityKey, canonical: EntityKey) -> Result<(), ClogError> {
+    pub(crate) fn insert(
+        &mut self,
+        alias: EntityKey,
+        canonical: EntityKey,
+    ) -> Result<(), ClogError> {
         let flattened = self.flatten_target(&canonical);
         if flattened == alias {
             return Err(ClogError::AliasCycle);
@@ -104,8 +111,14 @@ mod tests {
     fn u_alias_2_cycle_rejected() {
         let mut m = AliasMap::default();
         m.insert(k("p", "a"), k("p", "b")).unwrap();
-        assert!(matches!(m.insert(k("p", "b"), k("p", "a")), Err(crate::ClogError::AliasCycle)));
-        assert!(matches!(m.insert(k("p", "z"), k("p", "z")), Err(crate::ClogError::AliasCycle)));
+        assert!(matches!(
+            m.insert(k("p", "b"), k("p", "a")),
+            Err(crate::ClogError::AliasCycle)
+        ));
+        assert!(matches!(
+            m.insert(k("p", "z"), k("p", "z")),
+            Err(crate::ClogError::AliasCycle)
+        ));
     }
 
     #[test]
