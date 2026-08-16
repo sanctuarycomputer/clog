@@ -127,6 +127,54 @@ mod tests {
         assert_eq!(resolve(&g, Credibility::Six).unwrap().claim_key, "z");
     }
 
+    /// Tier 2 in isolation: everything else tied, only reliability differs.
+    ///
+    /// The better claim is given the *lexicographically smaller* key and both
+    /// share a `recorded_at`, so the two tiers below reliability both favour
+    /// the worse claim. Only a correctly-oriented reliability comparison can
+    /// produce this answer: drop the tier and the key tiebreak picks
+    /// `"z-worse"`; invert it and reliability itself picks `"z-worse"`.
+    #[test]
+    fn u_belief_1_tier_2_reliability_alone() {
+        use Credibility::*;
+        use Reliability::*;
+        let better = claim("a-better", 100, B, Three);
+        let worse = claim("z-worse", 100, D, Three);
+        let g = [
+            BeliefInput {
+                claim: &better,
+                recorded_at: 7,
+            },
+            BeliefInput {
+                claim: &worse,
+                recorded_at: 7,
+            },
+        ];
+        assert_eq!(resolve(&g, Six).unwrap().claim_key, "a-better");
+    }
+
+    /// Tier 3 in isolation: `occurred_at` *and* reliability tied, only
+    /// credibility differs. Same trap as tier 2 — the better claim loses
+    /// every lower tiebreak.
+    #[test]
+    fn u_belief_1_tier_3_credibility_alone() {
+        use Credibility::*;
+        use Reliability::*;
+        let better = claim("a-better", 100, C, Two);
+        let worse = claim("z-worse", 100, C, Five);
+        let g = [
+            BeliefInput {
+                claim: &better,
+                recorded_at: 7,
+            },
+            BeliefInput {
+                claim: &worse,
+                recorded_at: 7,
+            },
+        ];
+        assert_eq!(resolve(&g, Six).unwrap().claim_key, "a-better");
+    }
+
     fn b0(base: &Claim, key: &str) -> Claim {
         let mut c = base.clone();
         c.claim_key = key.into();

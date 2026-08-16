@@ -163,7 +163,9 @@ pub struct Claim {
 pub struct Focus {
     /// Per-kind weight multipliers.
     pub weights: BTreeMap<String, f32>,
-    /// Additive score boosts for specific entities.
+    /// Multiplicative score boosts for specific entities. Every boost whose
+    /// entity a claim mentions multiplies into that claim's score, so two
+    /// matching boosts stack as their product (spec §5.4).
     pub boosts: Vec<(EntityRef, f32)>,
     /// The half-life, in days, used for recency decay.
     pub half_life_days: f32,
@@ -194,7 +196,7 @@ impl Focus {
         self
     }
 
-    /// Adds an additive score boost for an entity.
+    /// Adds a multiplicative score boost for an entity (spec §5.4).
     pub fn boost(mut self, e: EntityRef, f: f32) -> Focus {
         self.boosts.push((e, f));
         self
@@ -216,7 +218,8 @@ impl Focus {
 /// Selects which materialized view to read.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum View {
-    /// The live, ranked feed of recent claims.
+    /// Every live claim, in `claim_key` order. Unranked and unfiltered by
+    /// recency: this is the whole world, not a feed.
     Live,
     /// The current state of tracked entities.
     EntityState,
@@ -362,8 +365,11 @@ impl Default for TickConfig {
 /// A single condition used by a `Rule` to match a claim.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Matcher {
-    /// Matches if the claim body contains this substring, case-insensitively.
-    BodyContains(String),
+    /// Matches if the claim body contains this substring (spec §5.6).
+    ///
+    /// The `bool` is `case_insensitive`: `true` compares both sides
+    /// lowercased, `false` compares them verbatim.
+    BodyContains(String, bool),
     /// Matches if the claim body matches this regular expression.
     BodyRegex(String),
     /// Matches if the claim's observer equals this string.
@@ -453,9 +459,10 @@ pub struct Config {
     pub wal_fsync: FsyncPolicy,
     /// The bounded write queue depth.
     pub write_queue: usize,
-    /// If `true`, drops cached engine state and rebuilds materialized views
-    /// by replaying the WAL from scratch on open, rather than resuming from
-    /// the persisted cache.
+    /// Accepted, and in P1 identical to a normal open: there is no persisted
+    /// engine state to drop, so every open already replays the whole WAL.
+    /// Becomes meaningful once engine snapshots exist, when it will mean
+    /// "ignore the snapshot and rebuild from the log".
     pub rebuild_on_open: bool,
 }
 

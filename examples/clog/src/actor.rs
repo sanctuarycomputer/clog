@@ -33,13 +33,12 @@ use crate::engine::{Batch, Engine, Event, StoredClaim, WorldViews};
 use crate::engine::{merge_body, merge_key};
 use crate::kinds::{self, RuleSet};
 use crate::render::template::{DEFAULT_TEMPLATE, Template, parse};
-use crate::render::time::rfc3339_utc;
 use crate::render::{ChangeItem, EntityItem, LoopItem, SlotInputs, UrgentItem, headline, render};
 use crate::types::{
     Ack, Claim, ClogError, Config, Credibility, EntityRef, Filter, Focus, ObserveOpts, ObserverId,
     Reliability, Rev, Row, Situation, View,
 };
-use crate::validate::{validate_claim, validate_focus};
+use crate::validate::{validate_claim, validate_config, validate_focus};
 use crate::wal::{self, Wal};
 
 /// The scope every instance always has (build design §9): a uniform focus,
@@ -200,6 +199,7 @@ pub(crate) struct Spawned {
 /// is no engine-state cache to drop yet (build design §5 defers snapshot
 /// files to M5), so every open is already a full WAL rebuild.
 pub(crate) fn spawn(cfg: Config) -> Result<Spawned, ClogError> {
+    validate_config(&cfg)?;
     let clock = Clock::new(cfg.tick.mode);
     let scopes = resolve_scopes(&cfg)?;
     let rules = kinds::compile(&cfg.kinds)?;
@@ -281,6 +281,26 @@ fn run(mut writer: Writer, rx: Receiver<Cmd>) {
         }
     }
     writer.shutdown();
+}
+
+/// Whether two claims are identical *for the INV-5 duplicate skip*: `a` is a
+/// re-send of `b` and nothing at all would change by committing it.
+///
+/// This is deliberately stricter than `Claim: PartialEq`. `EntityRef`'s
+/// equality is identity-only — `(etype, id)`, ignoring `name` — because that
+/// is what keys `by_entity`, the boost map and the display-name registry, and
+/// weakening it would break every one of them. But that makes `Claim`'s
+/// derived equality blind to a changed display name, and a re-observe that
+/// changes only a name is a real change: spec §5.1 step 3 supersedes on *any*
+/// difference, and §5.2's latest-name-wins registry can only learn the new
+/// name if the claim commits. So the entity *names* are compared alongside,
+/// positionally, leaving `EntityRef`'s identity semantics untouched.
+fn claims_identical(a: &Claim, b: &Claim) -> bool {
+    a == b
+        && a.entities
+            .iter()
+            .map(|e| &e.name)
+            .eq(b.entities.iter().map(|e| &e.name))
 }
 
 // ---- the writer -----------------------------------------------------------
@@ -426,14 +446,19 @@ impl Writer {
         }
 
         let now = self.clock.now_ms();
+        // §10 requires `occurred_at`/`observed_at` > 0, and a fresh `Manual`
+        // clock reads 0 until the host advances it. A merge is clog's own
+        // write, so it must not fail validation on a technicality the caller
+        // never chose: it stamps the earliest legal instant instead.
+        let stamp = now.max(1);
         let mut claim = Claim {
             claim_key: merge_key(&alias_key, &canonical_key),
             subject_key: None,
             source_ref: MERGE_SOURCE_REF.to_string(),
             observer: ObserverId::from(CLOG_OBSERVER),
             schema_v: 1,
-            occurred_at: now,
-            observed_at: now,
+            occurred_at: stamp,
+            observed_at: stamp,
             reliability: Reliability::A,
             credibility: Credibility::One,
             entities: vec![alias.clone(), canonical.clone()],
@@ -452,7 +477,7 @@ impl Writer {
             .get(&claim.claim_key)
             .map(|sc| &sc.claim);
         let events = match live {
-            Some(old) if *old == claim => Vec::new(),
+            Some(old) if claims_identical(old, &claim) => Vec::new(),
             Some(_) => vec![
                 Event::Retract {
                     claim_key: claim.claim_key.clone(),
@@ -476,9 +501,8 @@ impl Writer {
     /// that point in the batch*: an identical claim is skipped entirely
     /// (INV-5 — no rev bump, no WAL record, invisible), a different one
     /// becomes `Retract(old)` + `Observe(new)` (INV-4). The comparison is
-    /// full structural equality of the `Claim`; `recorded_at` is not part
-    /// of a claim, so a re-send with a later arrival time is still a
-    /// duplicate.
+    /// [`claims_identical`]; `recorded_at` is not part of a claim, so a
+    /// re-send with a later arrival time is still a duplicate.
     ///
     /// The rules tier then classifies the **surviving** version of each key
     /// — the one still live when the batch finishes — and appends the
@@ -502,7 +526,7 @@ impl Writer {
                     .map(|sc| &sc.claim)
             });
             match live {
-                Some(old) if old == claim => continue,
+                Some(old) if claims_identical(old, claim) => continue,
                 Some(_) => events.push(Event::Retract {
                     claim_key: claim.claim_key.clone(),
                 }),
@@ -647,10 +671,7 @@ impl Writer {
         // header included — a fresh timestamp on identical content would
         // claim a change that did not happen.
         let retained = previous
-            .filter(|s| {
-                mask_header(&s.situation.text, s.situation.rev, s.situation.as_of)
-                    == mask_header(&text, self.rev, now)
-            })
+            .filter(|s| same_document(&s.situation, scope, &text))
             .map(|s| s.situation.clone());
         let situation = retained.unwrap_or(Situation {
             scope: scope.to_string(),
@@ -892,19 +913,26 @@ fn hydrate(views: &WorldViews, key: &str, stored: &StoredClaim, score: Option<f3
 
 // ---- slot assembly --------------------------------------------------------
 
-/// Blanks the rev and timestamp the `header` slot renders, so two documents
-/// can be compared for *material* difference (§5.10).
+/// Whether two renders of a scope say the same thing, ignoring the rev and
+/// timestamp the `header` slot carries (§5.10).
 ///
-/// The header slot is `{scope} · rev {rev} · {as_of RFC3339}` (§5.8), and
-/// the default template opens with it, so replacing the first occurrence of
-/// the `rev {n} · {ts}` pair blanks exactly the header and nothing else —
-/// a claim body that happened to contain the same bytes sits after it.
-fn mask_header(text: &str, rev: Rev, as_of: u64) -> String {
-    text.replacen(
-        &format!("rev {rev} · {}", rfc3339_utc(as_of)),
-        "rev _ · _",
-        1,
-    )
+/// The header slot is `{scope} · rev {rev} · {as_of RFC3339}` (§5.8) and the
+/// default template — the only one `render_scope` ever uses — opens with it,
+/// so the header occupies exactly the first line. The comparison is therefore
+/// structural: everything *after* the first `'\n'` must match verbatim, and
+/// the scope (the one header field that is not bookkeeping) is compared from
+/// the stored `Situation` rather than parsed back out of the text.
+///
+/// Splitting beats masking the rev/timestamp pair out of the string: a claim
+/// body is host-supplied text that can contain anything, including the exact
+/// bytes of a header, and a mask that matches inside a body would call a
+/// changed document unchanged.
+fn same_document(previous: &Situation, scope: &str, text: &str) -> bool {
+    /// Everything after the first line — `""` for a single-line document.
+    fn body(text: &str) -> &str {
+        text.split_once('\n').map_or("", |(_, rest)| rest)
+    }
+    previous.scope == scope && body(&previous.text) == body(text)
 }
 
 /// Builds one scope's slot inputs from the materialized views (§5.7, §5.8).
@@ -948,11 +976,19 @@ fn slot_inputs(views: &WorldViews, scope: &str, rev: Rev, as_of_ms: u64) -> Slot
     // newest-first). An entity nobody believes anything about contributes
     // no summaries, and a bare "Name: " line says nothing, so it is dropped
     // rather than rendered empty.
+    //
+    // The display name goes through `headline` exactly as a claim body does.
+    // It is host-supplied text reaching the document verbatim, so a newline
+    // in `EntityRef.name` would otherwise fabricate document lines — an
+    // entity called "Acme\n1. (9.9) ship it now" would render as a urgent
+    // row nobody claimed. Collapsing whitespace and capping at 120 chars
+    // makes every entity exactly one line, as §5.8 already requires of every
+    // other item.
     let entities = entity_state(views, Some(ENTITY_STATE_ROWS))
         .into_iter()
         .filter(|(_, _, rows)| !rows.is_empty())
         .map(|(_, display, rows)| EntityItem {
-            display,
+            display: headline(&display),
             summaries: rows
                 .iter()
                 .map(|(_, stored)| headline(&stored.claim.body))

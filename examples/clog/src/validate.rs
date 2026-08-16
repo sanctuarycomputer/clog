@@ -67,6 +67,12 @@ pub(crate) fn validate_claim(
     }
 
     if let Some(subject_key) = &c.subject_key {
+        // `Some("")` is not "no subject": it would form a belief group keyed
+        // on the empty string, silently pooling unrelated claims. A host that
+        // means "no subject" says `None`.
+        if subject_key.trim().is_empty() {
+            return Err(invalid(index, "subject_key must be non-empty after trim"));
+        }
         if subject_key.len() > 256 {
             return Err(invalid(index, "subject_key must be <= 256 bytes"));
         }
@@ -154,9 +160,23 @@ pub(crate) fn validate_claim(
 /// Every weight key must name a defined kind; weight values and boost
 /// factors must be finite and strictly positive; `half_life_days` must lie
 /// in the open interval `(0.01, 3650)`.
+///
+/// # Errors
+///
+/// A weight key that names no defined kind is `ClogError::UnknownKind` — the
+/// host asked for something that could exist and does not. Every *value*
+/// error is `ClogError::Corrupt { detail: "config: ..." }`, matching the
+/// ruling already applied to an uncompilable taxonomy regex (see
+/// [`crate::kinds::compile`]): a `Focus` is config clog must trust, and
+/// `InvalidFilter` is reserved for a malformed `Filter` on a *read*.
 pub(crate) fn validate_focus(f: &Focus, taxonomy: &KindTaxonomy) -> Result<(), ClogError> {
     fn valid_factor(v: f32) -> bool {
         v.is_finite() && v > 0.0
+    }
+    fn bad(detail: impl Into<String>) -> ClogError {
+        ClogError::Corrupt {
+            detail: detail.into(),
+        }
     }
 
     for (kind, w) in &f.weights {
@@ -164,34 +184,58 @@ pub(crate) fn validate_focus(f: &Focus, taxonomy: &KindTaxonomy) -> Result<(), C
             return Err(ClogError::UnknownKind);
         }
         if !valid_factor(*w) {
-            return Err(ClogError::InvalidFilter {
-                reason: format!("focus weight for {kind} must be finite and > 0"),
-            });
+            return Err(bad(format!(
+                "config: focus weight for {kind} must be finite and > 0"
+            )));
         }
     }
 
     for (_, boost) in &f.boosts {
         if !valid_factor(*boost) {
-            return Err(ClogError::InvalidFilter {
-                reason: "focus boost factor must be finite and > 0".into(),
-            });
+            return Err(bad("config: focus boost factor must be finite and > 0"));
         }
     }
 
     if !(0.01 < f.half_life_days && f.half_life_days < 3650.0) {
-        return Err(ClogError::InvalidFilter {
-            reason: "half_life_days must be in (0.01, 3650)".into(),
-        });
+        return Err(bad("config: half_life_days must be in (0.01, 3650)"));
     }
 
+    Ok(())
+}
+
+/// Validates the scalar knobs of a `Config` that no other check covers.
+///
+/// Runs first thing in `Clog::open`, before the WAL is touched: an instance
+/// that cannot score is never opened at all.
+///
+/// # Errors
+///
+/// `ClogError::Corrupt { detail: "config: ..." }`, the same ruling
+/// [`validate_focus`] and [`crate::kinds::compile`] use for unusable config.
+pub(crate) fn validate_config(cfg: &crate::types::Config) -> Result<(), ClogError> {
+    // It is the divisor of the decay bucket width (`score::bucket_age_days`):
+    // zero makes every bucket width infinite and every score NaN, which then
+    // silently sorts to the bottom of `urgent` rather than failing.
+    if cfg.decay_buckets_per_half_life == 0 {
+        return Err(ClogError::Corrupt {
+            detail: "config: decay_buckets_per_half_life must be > 0".to_string(),
+        });
+    }
     Ok(())
 }
 
 /// Clamps a timestamp for scoring purposes only (§10): values more than 24h
 /// beyond `now` are clamped to `now`. Storage always keeps the verbatim
 /// value; only scoring consumes this clamped result.
+///
+/// Saturating: a `now` within 24h of `u64::MAX` (reachable, since the manual
+/// clock saturates there) must not overflow the cutoff and panic the writer.
 pub(crate) fn scoring_clamp(ts: u64, now: u64) -> u64 {
-    if ts > now + 86_400_000 { now } else { ts }
+    if ts > now.saturating_add(86_400_000) {
+        now
+    } else {
+        ts
+    }
 }
 
 #[cfg(test)]
@@ -223,6 +267,18 @@ mod tests {
             ),
             (
                 Box::new(|c| c.subject_key = Some("x".repeat(257))),
+                false,
+                "subject_key",
+            ),
+            // `Some("")` / whitespace-only is not "no subject": it would form
+            // a belief group keyed on nothing at all.
+            (
+                Box::new(|c| c.subject_key = Some(String::new())),
+                false,
+                "subject_key",
+            ),
+            (
+                Box::new(|c| c.subject_key = Some("   \t ".into())),
                 false,
                 "subject_key",
             ),
@@ -397,13 +453,20 @@ mod tests {
             validate_focus(&Focus::uniform().weight("nope", 1.0), &tax),
             Err(ClogError::UnknownKind)
         ));
-        assert!(validate_focus(&Focus::uniform().weight("risk", f32::NAN), &tax).is_err());
-        assert!(validate_focus(&Focus::uniform().weight("risk", 0.0), &tax).is_err());
-        assert!(validate_focus(&Focus::uniform().half_life_days(0.005), &tax).is_err());
-        assert!(validate_focus(&Focus::uniform().half_life_days(4000.0), &tax).is_err());
+        // Every *value* error is config corruption, not an invalid filter.
+        let bad = |f: Focus| match validate_focus(&f, &tax) {
+            Err(ClogError::Corrupt { detail }) => {
+                assert!(detail.starts_with("config: "), "{detail}");
+            }
+            other => panic!("expected Corrupt, got {other:?}"),
+        };
+        bad(Focus::uniform().weight("risk", f32::NAN));
+        bad(Focus::uniform().weight("risk", 0.0));
+        bad(Focus::uniform().half_life_days(0.005));
+        bad(Focus::uniform().half_life_days(4000.0));
         // half-life bounds are exclusive: exactly the endpoints must fail.
-        assert!(validate_focus(&Focus::uniform().half_life_days(0.01), &tax).is_err());
-        assert!(validate_focus(&Focus::uniform().half_life_days(3650.0), &tax).is_err());
+        bad(Focus::uniform().half_life_days(0.01));
+        bad(Focus::uniform().half_life_days(3650.0));
         // boost factors: valid, NaN, zero.
         let e = EntityRef {
             etype: "p".into(),
@@ -411,8 +474,21 @@ mod tests {
             name: None,
         };
         assert!(validate_focus(&Focus::uniform().boost(e.clone(), 1.5), &tax).is_ok());
-        assert!(validate_focus(&Focus::uniform().boost(e.clone(), f32::NAN), &tax).is_err());
-        assert!(validate_focus(&Focus::uniform().boost(e, 0.0), &tax).is_err());
+        bad(Focus::uniform().boost(e.clone(), f32::NAN));
+        bad(Focus::uniform().boost(e, 0.0));
+    }
+
+    #[test]
+    fn zero_decay_buckets_is_rejected_config() {
+        let mut cfg = crate::types::Config::default_for("/tmp/x");
+        assert!(validate_config(&cfg).is_ok());
+        cfg.decay_buckets_per_half_life = 0;
+        match validate_config(&cfg) {
+            Err(ClogError::Corrupt { detail }) => {
+                assert_eq!(detail, "config: decay_buckets_per_half_life must be > 0");
+            }
+            other => panic!("expected Corrupt, got {other:?}"),
+        }
     }
 
     #[test]
@@ -423,5 +499,16 @@ mod tests {
             1_000_000 + 86_400_000
         );
         assert_eq!(scoring_clamp(1_000_000 + 86_400_001, 1_000_000), 1_000_000);
+    }
+
+    /// A manual clock saturates at `u64::MAX`, so `now + 24h` is a real
+    /// overflow: under overflow checks it panics the writer thread mid-write.
+    #[test]
+    fn scoring_clamp_saturates_at_the_end_of_time() {
+        let now = u64::MAX;
+        assert_eq!(scoring_clamp(now, now), now);
+        assert_eq!(scoring_clamp(1, now), 1);
+        // The cutoff saturates, so nothing is ever *beyond* it here.
+        assert_eq!(scoring_clamp(u64::MAX, u64::MAX - 1), u64::MAX);
     }
 }

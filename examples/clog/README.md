@@ -128,11 +128,11 @@ override what you need.
 | `top_k` | `12` | Default cap on ranked rows per rendered situation. |
 | `budget_chars` | `6000` | Character budget for a rendered situation document. |
 | `tick` | `TickConfig { mode: System, interval_ms: 60_000 }` | Clock mode (`System` or `Manual`, INV-10) and tick interval. |
-| `decay_buckets_per_half_life` | `4` | Granularity of the bucketed recency-decay clock. |
+| `decay_buckets_per_half_life` | `4` | Granularity of the bucketed recency-decay clock. Must be `> 0`; `0` is rejected at `open`. |
 | `belief_min_credibility` | `Credibility::Six` | The credibility floor below which a claim is never believed. |
 | `wal_fsync` | `FsyncPolicy::OnCommit` | Whether the WAL fsyncs after every commit or relies on OS buffering. |
 | `write_queue` | `1024` | Bounded depth of the writer's command channel — backpressure past this blocks the caller. |
-| `rebuild_on_open` | `false` | If `true`, discards cached engine state and rebuilds every view from a full WAL replay on open. |
+| `rebuild_on_open` | `false` | Accepted; identical to a normal open in P1 (the WAL is always fully replayed). Becomes meaningful with engine snapshots. |
 
 ## Caveats
 

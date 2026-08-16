@@ -59,8 +59,8 @@ fn fixture_config(dir: &std::path::Path) -> Config {
         match kd.name.as_str() {
             "risk" => kd.rules.push(Rule {
                 any_of: vec![
-                    Matcher::BodyContains("overdue".into()),
-                    Matcher::BodyContains("slipping".into()),
+                    Matcher::BodyContains("overdue".into(), true),
+                    Matcher::BodyContains("slipping".into(), true),
                 ],
             }),
             "question" => kd.rules.push(Rule {
@@ -70,7 +70,7 @@ fn fixture_config(dir: &std::path::Path) -> Config {
                 any_of: vec![Matcher::ObserverIs("bank-feed".into())],
             }),
             "opportunity" => kd.rules.push(Rule {
-                any_of: vec![Matcher::BodyContains("inbound".into())],
+                any_of: vec![Matcher::BodyContains("inbound".into(), true)],
             }),
             // Beyond the brief's four required rules: without this, claims
             // 5/6/11 (a kickoff move, a PTO note, a moved 1:1) all land in
@@ -79,8 +79,8 @@ fn fixture_config(dir: &std::path::Path) -> Config {
             // exercised by any live claim. Documented in task-17-report.md.
             "fyi" => kd.rules.push(Rule {
                 any_of: vec![
-                    Matcher::BodyContains("moved".into()),
-                    Matcher::BodyContains("PTO".into()),
+                    Matcher::BodyContains("moved".into(), true),
+                    Matcher::BodyContains("PTO".into(), true),
                 ],
             }),
             _ => {}

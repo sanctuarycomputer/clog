@@ -15,12 +15,19 @@ use crate::types::{Claim, ClogError, JudgeSource, KindLabel, KindTaxonomy, Match
 /// A `Matcher` with any embedded regex pre-compiled at `compile()` time.
 #[derive(Debug)]
 enum CompiledMatcher {
-    /// Case-insensitive substring match (both sides lowercased via
-    /// `to_lowercase`). This is a v1 simplification: it is not full Unicode
-    /// case-folding, just `char::to_lowercase` applied to the whole string,
-    /// which is correct-enough for the ASCII- and common-case text clog
-    /// expects in claim bodies.
-    BodyContains(String),
+    /// Substring match against the claim body.
+    ///
+    /// When `case_insensitive`, `needle` is pre-lowered at compile time and
+    /// the body is lowered per match. That is a v1 simplification: it is not
+    /// full Unicode case-folding, just `char::to_lowercase` applied to the
+    /// whole string, which is correct-enough for the ASCII- and common-case
+    /// text clog expects in claim bodies.
+    BodyContains {
+        /// The substring to look for, pre-lowered iff `case_insensitive`.
+        needle: String,
+        /// Whether to compare lowercased.
+        case_insensitive: bool,
+    },
     /// Regex match against the claim body, pre-compiled.
     BodyRegex(Regex),
     /// Exact match against the observer's inner string.
@@ -38,7 +45,16 @@ struct CompiledRule {
 impl CompiledRule {
     fn matches(&self, c: &Claim) -> bool {
         self.any_of.iter().any(|m| match m {
-            CompiledMatcher::BodyContains(needle) => c.body.to_lowercase().contains(needle),
+            CompiledMatcher::BodyContains {
+                needle,
+                case_insensitive,
+            } => {
+                if *case_insensitive {
+                    c.body.to_lowercase().contains(needle)
+                } else {
+                    c.body.contains(needle)
+                }
+            }
             CompiledMatcher::BodyRegex(re) => re.is_match(&c.body),
             CompiledMatcher::ObserverIs(s) => &c.observer.0 == s,
             CompiledMatcher::EntityType(etype) => c.entities.iter().any(|e| &e.etype == etype),
@@ -69,7 +85,14 @@ pub(crate) struct RuleSet {
 pub(crate) fn compile(tax: &KindTaxonomy) -> Result<RuleSet, ClogError> {
     fn compile_matcher(m: &Matcher) -> Result<CompiledMatcher, ClogError> {
         Ok(match m {
-            Matcher::BodyContains(s) => CompiledMatcher::BodyContains(s.to_lowercase()),
+            Matcher::BodyContains(s, case_insensitive) => CompiledMatcher::BodyContains {
+                needle: if *case_insensitive {
+                    s.to_lowercase()
+                } else {
+                    s.clone()
+                },
+                case_insensitive: *case_insensitive,
+            },
             Matcher::BodyRegex(pat) => {
                 let re = Regex::new(pat).map_err(|e| ClogError::Corrupt {
                     detail: format!("config: bad regex {pat:?}: {e}"),
@@ -140,7 +163,7 @@ mod tests {
         for kd in &mut tax.kinds {
             match kd.name.as_str() {
                 "risk" => kd.rules.push(Rule {
-                    any_of: vec![Matcher::BodyContains("overdue".into())],
+                    any_of: vec![Matcher::BodyContains("overdue".into(), true)],
                 }),
                 "question" => kd.rules.push(Rule {
                     any_of: vec![
@@ -189,6 +212,34 @@ mod tests {
         // no match -> None
         c.observer = ObserverId::from("o1");
         assert!(classify(&rs, &c).is_none());
+    }
+
+    /// §5.6's `BodyContains` carries its own case flag: `false` must compare
+    /// verbatim, and must not silently fall back to the insensitive path.
+    #[test]
+    fn body_contains_honours_the_case_sensitivity_flag() {
+        let tax_with = |needle: &str, case_insensitive: bool| {
+            let mut tax = KindTaxonomy::default_taxonomy();
+            for kd in &mut tax.kinds {
+                if kd.name == "risk" {
+                    kd.rules.push(Rule {
+                        any_of: vec![Matcher::BodyContains(needle.into(), case_insensitive)],
+                    });
+                }
+            }
+            compile(&tax).unwrap()
+        };
+        let mut c = tests_base_claim();
+        c.body = "Invoice 1042 is OVERDUE".into();
+
+        // case-sensitive: only the exact casing matches
+        assert!(classify(&tax_with("OVERDUE", false), &c).is_some());
+        assert!(classify(&tax_with("overdue", false), &c).is_none());
+        assert!(classify(&tax_with("Overdue", false), &c).is_none());
+        // case-insensitive: any casing of the needle matches any of the body
+        assert!(classify(&tax_with("overdue", true), &c).is_some());
+        assert!(classify(&tax_with("OvErDuE", true), &c).is_some());
+        assert!(classify(&tax_with("paid", true), &c).is_none());
     }
 
     #[test]

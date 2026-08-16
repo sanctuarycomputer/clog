@@ -142,10 +142,13 @@ impl Clog {
     ///
     /// - `ClogError::Storage` if the WAL directory cannot be created, read
     ///   or opened;
-    /// - `ClogError::Corrupt` if a classification rule's regex fails to
-    ///   compile;
-    /// - `ClogError::UnknownKind` / `ClogError::InvalidFilter` if a
-    ///   configured `Focus` is invalid (spec §10).
+    /// - `ClogError::UnknownKind` if a configured `Focus` weights a kind the
+    ///   taxonomy does not define (spec §10);
+    /// - `ClogError::Corrupt { detail: "config: ..." }` for config clog
+    ///   cannot use: a classification rule whose regex will not compile, a
+    ///   `Focus` value that is not finite and positive or whose
+    ///   `half_life_days` is out of bounds, or a zero
+    ///   `decay_buckets_per_half_life`.
     ///
     /// A torn or corrupt WAL tail is *not* an error: it is quarantined and
     /// truncated, and the surviving prefix is replayed (recovery test R2).

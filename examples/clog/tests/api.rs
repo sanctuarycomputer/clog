@@ -197,7 +197,7 @@ fn rules_tier_classifies_at_commit() {
     for kd in &mut config.kinds.kinds {
         if kd.name == "risk" {
             kd.rules.push(clog::Rule {
-                any_of: vec![clog::Matcher::BodyContains("overdue".into())],
+                any_of: vec![clog::Matcher::BodyContains("overdue".into(), true)],
             });
         }
     }
@@ -226,7 +226,7 @@ fn only_the_surviving_version_of_a_key_is_classified() {
     for kd in &mut config.kinds.kinds {
         if kd.name == "risk" {
             kd.rules.push(clog::Rule {
-                any_of: vec![clog::Matcher::BodyContains("overdue".into())],
+                any_of: vec![clog::Matcher::BodyContains("overdue".into(), true)],
             });
         }
     }
@@ -512,7 +512,7 @@ fn select_filters_and_compose_and_limit_is_bounded() {
     for kd in &mut config.kinds.kinds {
         if kd.name == "risk" {
             kd.rules.push(clog::Rule {
-                any_of: vec![clog::Matcher::BodyContains("overdue".into())],
+                any_of: vec![clog::Matcher::BodyContains("overdue".into(), true)],
             });
         }
     }
@@ -949,4 +949,196 @@ fn entity_state_select_reports_a_multi_entity_claim_once() {
         ..Filter::default()
     };
     assert_eq!(c.select(View::EntityState, f).unwrap().len(), 1);
+}
+
+// An entity's display name is host-supplied text that reaches the rendered
+// document verbatim. A newline in it would fabricate document lines — an
+// agent reading the brief cannot tell an invented line from a claimed one.
+#[test]
+fn entity_display_name_cannot_fabricate_document_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = Clog::open(cfg(dir.path())).unwrap();
+    c.advance(1_000_000).unwrap();
+    let mut cl = claim("k", "status update", 500_000);
+    cl.subject_key = Some("s1".into());
+    cl.entities = vec![EntityRef {
+        etype: "p".into(),
+        id: "x".into(),
+        name: Some("Acme\nINJECTED: a line nobody claimed".into()),
+    }];
+    c.observe(vec![cl], ObserveOpts::default()).unwrap();
+
+    let text = c.situation(None, None).unwrap().text;
+    let carrying: Vec<&str> = text.lines().filter(|l| l.contains("INJECTED")).collect();
+    assert_eq!(carrying.len(), 1, "name must render as ONE line:\n{text}");
+    assert_eq!(
+        carrying[0], "Acme INJECTED: a line nobody claimed: status update",
+        "\n{text}"
+    );
+    assert!(
+        !text.lines().any(|l| l.starts_with("INJECTED")),
+        "no fabricated line at column 0:\n{text}"
+    );
+}
+
+// INV-5's duplicate skip must not swallow a changed display name.
+// `EntityRef` equality is identity-only by design, so `Claim`'s derived
+// `PartialEq` is blind to `name` — but spec §5.1 step 3 supersedes on any
+// difference and §5.2 is latest-name-wins, which can only happen if the
+// claim commits.
+#[test]
+fn a_changed_entity_display_name_is_not_a_duplicate() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = Clog::open(cfg(dir.path())).unwrap();
+    c.advance(1_000_000).unwrap();
+    let named = |name: &str| {
+        let mut cl = claim("k", "status update", 500_000);
+        cl.subject_key = Some("s1".into());
+        cl.entities = vec![EntityRef {
+            etype: "p".into(),
+            id: "x".into(),
+            name: Some(name.into()),
+        }];
+        cl
+    };
+    let first = c
+        .observe(vec![named("Old Name")], ObserveOpts::default())
+        .unwrap();
+    let before = c.situation(None, None).unwrap().text;
+    assert!(before.contains("Old Name: "), "{before}");
+
+    let second = c
+        .observe(vec![named("New Name")], ObserveOpts::default())
+        .unwrap();
+    assert_eq!(
+        second.rev,
+        first.rev + 1,
+        "a changed display name is a real change"
+    );
+
+    let rows = c.select(View::Live, Filter::default()).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].claim.entities[0].name.as_deref(),
+        Some("New Name"),
+        "the stored claim must carry the new name"
+    );
+
+    let text = c.situation(None, None).unwrap().text;
+    assert!(text.contains("New Name: "), "{text}");
+    assert!(!text.contains("Old Name"), "{text}");
+
+    // ...and a genuinely identical re-observe is still invisible (INV-5).
+    assert_eq!(
+        c.observe(vec![named("New Name")], ObserveOpts::default())
+            .unwrap()
+            .rev,
+        second.rev
+    );
+}
+
+// A merge is clog's own write, stamped from clog's own clock. A fresh manual
+// clock reads 0 and §10 requires timestamps > 0: the merge must not fail on
+// a technicality the caller never chose.
+#[test]
+fn merge_succeeds_on_a_fresh_manual_clock() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = Clog::open(cfg(dir.path())).unwrap();
+    // deliberately no `advance`: the clock still reads 0
+    let a = EntityRef {
+        etype: "p".into(),
+        id: "a".into(),
+        name: None,
+    };
+    let b = EntityRef {
+        etype: "p".into(),
+        id: "b".into(),
+        name: None,
+    };
+    let ack = c.merge_entities(&a, &b).unwrap();
+    assert_eq!(ack.rev, 1, "the merge must commit");
+    // the edge really exists: its reserved claim is retractable
+    c.retract("clog:merge:p:a->p:b").unwrap();
+}
+
+// `min_score` is the one filter that only means anything on a ranked view,
+// and it is inclusive at the boundary (the `select` contract).
+#[test]
+fn min_score_filters_urgent_at_an_inclusive_boundary() {
+    const NOW: u64 = 30 * 86_400_000;
+    let dir = tempfile::tempdir().unwrap();
+    let c = Clog::open(cfg(dir.path())).unwrap();
+    c.advance(NOW).unwrap();
+    // Same trust, different age: recency decay alone separates the scores.
+    c.observe(
+        vec![
+            claim("fresh", "happened just now", NOW),
+            claim("stale", "happened ten days ago", NOW - 10 * 86_400_000),
+        ],
+        ObserveOpts::default(),
+    )
+    .unwrap();
+
+    let urgent = || View::Urgent {
+        scope: "default".into(),
+    };
+    let rows = c.select(urgent(), Filter::default()).unwrap();
+    assert_eq!(rows.len(), 2);
+    let (hi, lo) = (rows[0].score.unwrap(), rows[1].score.unwrap());
+    assert!(hi > lo, "{hi} vs {lo}");
+
+    let with = |min: f32| {
+        c.select(
+            urgent(),
+            Filter {
+                min_score: Some(min),
+                ..Filter::default()
+            },
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.claim.claim_key.clone())
+        .collect::<Vec<_>>()
+    };
+    // a threshold between the two excludes the low-scoring row...
+    assert_eq!(with(lo + (hi - lo) / 2.0), vec!["fresh".to_string()]);
+    // ...and the comparison is inclusive exactly at either boundary
+    assert_eq!(with(hi), vec!["fresh".to_string()]);
+    assert_eq!(with(lo), vec!["fresh".to_string(), "stale".to_string()]);
+    // above every score: nothing
+    assert!(with(hi * 2.0).is_empty());
+}
+
+// Config clog cannot use is rejected at `open` rather than tolerated into
+// NaN scores or surfaced as a confusing `InvalidFilter` on some later read.
+#[test]
+fn unusable_config_is_rejected_at_open_as_corrupt() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = cfg(dir.path());
+    config.decay_buckets_per_half_life = 0;
+    let err = Clog::open(config).err().expect("must be rejected");
+    assert!(
+        matches!(&err, ClogError::Corrupt { detail }
+            if detail == "config: decay_buckets_per_half_life must be > 0"),
+        "{err:?}"
+    );
+
+    // A focus *value* error is likewise config corruption...
+    let mut config = cfg(dir.path());
+    config
+        .scopes
+        .insert("bad".into(), Focus::uniform().half_life_days(0.0));
+    let err = Clog::open(config).err().expect("must be rejected");
+    assert!(
+        matches!(&err, ClogError::Corrupt { detail } if detail.starts_with("config: ")),
+        "{err:?}"
+    );
+
+    // ...while an unknown *kind* stays its own error: the host named
+    // something that could have existed.
+    let mut config = cfg(dir.path());
+    config
+        .scopes
+        .insert("bad".into(), Focus::uniform().weight("no-such-kind", 2.0));
+    assert!(matches!(Clog::open(config), Err(ClogError::UnknownKind)));
 }

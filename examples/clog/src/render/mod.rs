@@ -50,7 +50,9 @@ pub(crate) struct LoopItem {
 /// An entity summary item (spec §5.8, `%{entities}` slot).
 #[derive(Clone, Debug)]
 pub(crate) struct EntityItem {
-    /// The entity's display name.
+    /// The entity's display name, pre-normalized through [`headline`] like
+    /// every other host-supplied string that reaches the document: it is one
+    /// line, always.
     pub display: String,
     /// Summary lines for this entity, newest-first; joined with `"; "`.
     pub summaries: Vec<String>,
@@ -326,30 +328,165 @@ Halcyon: paid; kicked off
         assert_eq!(out, expected);
     }
 
+    /// A template with no per-slot `limit=`, so budgeting is the *only*
+    /// thing that can drop an item, and with a literal marker before each
+    /// slot so the output can be split back into its four blocks.
+    const TAGGED_TEMPLATE: &str = "[urgent]\n%{urgent}\n[loops]\n%{open_loops}\n[entities]\n%{entities}\n[changes]\n%{changes}\n";
+
+    /// Three items in every slot, each carrying a tag unique to its slot
+    /// (`U0..U2`, `L0..L2`, `E0..E2`, `C0..C2`) so a render reads back as
+    /// "how many of each slot survived".
+    fn tagged_inputs() -> SlotInputs {
+        SlotInputs {
+            scope: "s".into(),
+            rev: 1,
+            as_of_ms: 0,
+            urgent: (0..3)
+                .map(|i| UrgentItem {
+                    score: 1.0,
+                    headline: format!("U{i}"),
+                    reliability: 'A',
+                    credibility: 1,
+                    claim_key: format!("k{i}"),
+                })
+                .collect(),
+            open_loops: (0..3)
+                .map(|i| LoopItem {
+                    kind: "risk".into(),
+                    headline: format!("L{i}"),
+                    claim_key: format!("k{i}"),
+                })
+                .collect(),
+            entities: (0..3)
+                .map(|i| EntityItem {
+                    display: format!("E{i}"),
+                    summaries: vec!["x".into()],
+                })
+                .collect(),
+            changes: (0..3).map(|i| ChangeItem::Added(format!("C{i}"))).collect(),
+        }
+    }
+
+    /// `[urgent, open_loops, entities, changes]` survivor counts.
+    fn slot_counts(out: &str) -> [usize; 4] {
+        let n = |tag: char| {
+            (0..3)
+                .filter(|i| out.contains(&format!("{tag}{i}")))
+                .count()
+        };
+        [n('U'), n('L'), n('E'), n('C')]
+    }
+
+    /// The four rendered blocks of [`TAGGED_TEMPLATE`], in slot order.
+    fn slot_blocks(out: &str) -> Vec<&str> {
+        let blocks: Vec<&str> = out.split("\n[").collect();
+        assert_eq!(blocks.len(), 4, "template shape changed:\n{out}");
+        blocks
+    }
+
+    /// U-TMPL-2: the budget is a real cap, dropping is ordered, and every
+    /// truncated slot says how much it hid.
+    ///
+    /// Walks *every* budget from the full render down to zero and asserts
+    /// all three properties at each one, so no single hand-picked budget can
+    /// make the test vacuous, and asserts the four milestone states are
+    /// actually reached, so the ordering claim is not vacuous either.
     #[test]
-    fn u_tmpl_2_budget_truncation_order() {
-        // budget small enough to force dropping all changes and one entity summary line
+    fn u_tmpl_2_budget_is_a_cap_and_truncation_is_ordered() {
+        let t = parse(TAGGED_TEMPLATE).unwrap();
+        let inputs = tagged_inputs();
+        let full = render(&t, &inputs, 100_000);
+        assert_eq!(slot_counts(&full), [3, 3, 3, 3], "{full}");
+        let full_len = full.chars().count();
+        // Everything droppable dropped: the shortest this document can get,
+        // and so the smallest budget that can possibly be honoured.
+        let floor = render(&t, &inputs, 0).chars().count();
+        assert!(floor < full_len);
+
+        let mut milestones: Vec<[usize; 4]> = Vec::new();
+        for budget in (0..=full_len).rev() {
+            let out = render(&t, &inputs, budget);
+            let [urgent, loops, entities, changes] = slot_counts(&out);
+
+            // (a) the budget is honoured wherever it is achievable at all.
+            if budget >= floor {
+                assert!(
+                    out.chars().count() <= budget,
+                    "budget {budget} exceeded:\n{out}"
+                );
+            }
+
+            // (b) reverse-priority drop order: a slot may only lose items
+            // once every lower-priority slot has been drained.
+            assert!(
+                entities == 3 || changes == 0,
+                "entities dropped before changes drained (budget {budget}):\n{out}"
+            );
+            assert!(
+                loops == 3 || entities == 0,
+                "open_loops dropped before entities drained (budget {budget}):\n{out}"
+            );
+            assert!(
+                urgent == 3 || loops == 0,
+                "urgent dropped before open_loops drained (budget {budget}):\n{out}"
+            );
+
+            // (c) each slot's marker counts exactly what that slot hid.
+            for (block, kept) in slot_blocks(&out)
+                .into_iter()
+                .zip([urgent, loops, entities, changes])
+            {
+                if kept == 3 {
+                    assert!(!block.contains('…'), "spurious marker:\n{block}");
+                } else {
+                    assert!(
+                        block.contains(&format!("… ({} more)", 3 - kept)),
+                        "wrong or missing marker (kept {kept}):\n{block}"
+                    );
+                }
+            }
+
+            let counts = [urgent, loops, entities, changes];
+            if milestones.last() != Some(&counts) {
+                milestones.push(counts);
+            }
+        }
+        // The staged states really occur: changes drain first, then
+        // entities, then open_loops, and urgent goes last.
+        for state in [[3, 3, 3, 0], [3, 3, 0, 0], [3, 0, 0, 0], [0, 0, 0, 0]] {
+            assert!(
+                milestones.contains(&state),
+                "never observed {state:?}; saw {milestones:?}"
+            );
+        }
+    }
+
+    /// The same cap, exercised against the real default template (whose
+    /// per-slot `limit=`s and multi-byte `·` separators are the shape that
+    /// actually ships).
+    ///
+    /// The budget is char-based (spec §5.8: "total chars ... not bytes"), so
+    /// it is derived from `chars().count()`, not `len()`: this document
+    /// renders three U+00B7 middle dots, and a byte-derived budget of
+    /// `full.len() - 1` would never be tight enough to force any truncation
+    /// at all.
+    #[test]
+    fn u_tmpl_2_default_template_respects_its_budget() {
         let t = parse(DEFAULT_TEMPLATE).unwrap();
         let full = render(&t, &inputs(), 6000);
-        // NOTE: the brief's original budget here was `full.len() - 1`
-        // (bytes). This renders with three middle dots (U+00B7, 2 bytes
-        // each), so `full.len()` (bytes) exceeds `full.chars().count()`
-        // by 3, and `render`'s budget check is char-based (spec §5.8:
-        // "total chars ... not bytes"). A byte-derived budget of
-        // `full.len() - 1` is therefore never tight enough to trigger any
-        // truncation at all, which would make every assertion below
-        // vacuous or false. Using `full.chars().count() - 1` restores the
-        // test's intent — a budget just barely under the full render —
-        // against a spec-correct char-counting budgeter. See
-        // task-9-report.md for the full note.
-        let tight = render(&t, &inputs(), full.chars().count() - 1);
+        let budget = full.chars().count() - 1;
+        let tight = render(&t, &inputs(), budget);
+        assert!(tight.chars().count() <= budget, "{tight}");
         // changes go first, replaced by the marker
-        assert!(tight.contains("… (") && tight.contains("more)"));
-        assert!(!tight.contains("- old thing"));
-        // urgent survives longest
-        assert!(tight.contains("1. (1.2)"));
-        // never over budget
-        assert!(tight.chars().count() < full.len() || tight.contains("more)"));
+        assert!(tight.contains("… (1 more)"), "{tight}");
+        assert!(!tight.contains("- old thing"), "{tight}");
+        // everything of higher priority survives
+        assert!(
+            tight.contains("1. (1.2)") && tight.contains("2. (0.5)"),
+            "{tight}"
+        );
+        assert!(tight.contains("- QUESTION Did we sign?"), "{tight}");
+        assert!(tight.contains("Halcyon: paid; kicked off"), "{tight}");
     }
 
     #[test]

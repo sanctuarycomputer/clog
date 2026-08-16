@@ -22,13 +22,40 @@ const HEADER_LEN: usize = 8;
 pub(crate) struct Wal {
     file: File,
     fsync: FsyncPolicy,
+    /// Set when a failed append left a partial frame that could *not* be
+    /// truncated away. See [`Wal::append`].
+    poisoned: bool,
+    /// Test-only injection: write only this many bytes of the next frame and
+    /// then fail, simulating a short write (ENOSPC mid-frame).
+    #[cfg(test)]
+    fail_after_bytes: Option<usize>,
 }
 
 impl Wal {
     /// Appends `batch` as one `[len][crc32][payload]` frame, fsyncing per
     /// `self`'s policy afterwards (`OnCommit` calls `sync_data`; `Never`
     /// does not sync).
+    ///
+    /// **A failed append leaves no partial frame.** The log's length is read
+    /// *before* the write, and any error — a short write, a failed fsync —
+    /// truncates back to it. Without that rollback a torn frame would sit in
+    /// the middle of the log: the *next* successful append would land after
+    /// it, and reopen's CRC scan would stop at the tear and quarantine
+    /// everything from there on, silently discarding batches that were
+    /// already acked (spec §6.3, R2).
+    ///
+    /// If the truncation *itself* fails, the log is left in exactly the state
+    /// this method exists to prevent, so the `Wal` is poisoned: every later
+    /// append fails immediately rather than compounding the damage. Recovery
+    /// is to reopen the instance, which quarantines the tail and truncates it
+    /// on the way in.
     pub(crate) fn append(&mut self, batch: &Batch) -> Result<(), ClogError> {
+        if self.poisoned {
+            return Err(ClogError::Storage(std::io::Error::other(
+                "wal poisoned: a previous append failed and its partial frame \
+                 could not be truncated; reopen the instance to recover",
+            )));
+        }
         let payload = postcard::to_allocvec(batch).map_err(|e| ClogError::Corrupt {
             detail: format!("wal encode: {e}"),
         })?;
@@ -42,12 +69,42 @@ impl Wal {
         frame.extend_from_slice(&crc.to_le_bytes());
         frame.extend_from_slice(&payload);
 
-        self.file.write_all(&frame)?;
+        // Read before writing: this is the byte offset the frame starts at,
+        // and the length the log is rolled back to if anything below fails.
+        let pre_offset = self.file.metadata()?.len();
+        match self.write_frame(&frame) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.rollback(pre_offset);
+                Err(e)
+            }
+        }
+    }
+
+    /// Writes one whole frame and applies the fsync policy. Split out so
+    /// [`Wal::append`] has a single error path to roll back from.
+    fn write_frame(&mut self, frame: &[u8]) -> Result<(), ClogError> {
+        #[cfg(test)]
+        if let Some(n) = self.fail_after_bytes.take() {
+            self.file.write_all(&frame[..n.min(frame.len())])?;
+            return Err(ClogError::Storage(std::io::Error::other(
+                "injected short write",
+            )));
+        }
+        self.file.write_all(frame)?;
         match self.fsync {
             FsyncPolicy::OnCommit => self.file.sync_data()?,
             FsyncPolicy::Never => {}
         }
         Ok(())
+    }
+
+    /// Removes whatever a failed append wrote, poisoning the `Wal` if the
+    /// truncation cannot be done.
+    fn rollback(&mut self, pre_offset: u64) {
+        if self.file.set_len(pre_offset).is_err() {
+            self.poisoned = true;
+        }
     }
 
     /// Fsyncs the log unconditionally, whatever the policy says.
@@ -101,7 +158,16 @@ pub(crate) fn open_dir(dir: &Path, fsync: FsyncPolicy) -> Result<(Wal, Vec<Batch
         .append(true)
         .open(&log_path)?;
     sync_dir(&wal_dir);
-    Ok((Wal { file, fsync }, batches))
+    Ok((
+        Wal {
+            file,
+            fsync,
+            poisoned: false,
+            #[cfg(test)]
+            fail_after_bytes: None,
+        },
+        batches,
+    ))
 }
 
 /// Fsyncs the WAL directory itself, so the log file's *directory entry* is
@@ -291,6 +357,93 @@ mod tests {
             open_dir(dir.path(), crate::FsyncPolicy::OnCommit),
             Err(ClogError::Corrupt { .. })
         ));
+    }
+
+    /// The recovery contract a partial frame would otherwise break: an append
+    /// that fails mid-frame must leave the log exactly as it was, so the
+    /// *next* append lands at a good frame boundary and reopen replays
+    /// everything — including the batches acked before the failure.
+    ///
+    /// Without the rollback the torn bytes sit between two good frames:
+    /// replay stops at the tear, and every batch after it is quarantined and
+    /// truncated away despite having been acked.
+    #[test]
+    fn failed_append_is_truncated_and_later_batches_replay_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let (mut w, _) = open_dir(dir.path(), crate::FsyncPolicy::OnCommit).unwrap();
+            w.append(&batch(1)).unwrap();
+            let good_len = std::fs::metadata(dir.path().join("wal").join("log"))
+                .unwrap()
+                .len();
+
+            // Fail 6 bytes into the next frame: a torn header, mid-frame.
+            w.fail_after_bytes = Some(6);
+            assert!(matches!(w.append(&batch(2)), Err(ClogError::Storage(_))));
+            assert_eq!(
+                std::fs::metadata(dir.path().join("wal").join("log"))
+                    .unwrap()
+                    .len(),
+                good_len,
+                "a failed append must leave no partial frame behind"
+            );
+
+            // The writer stays usable: the next batch appends at the good
+            // boundary the rollback restored.
+            w.append(&batch(2)).unwrap();
+            w.append(&batch(3)).unwrap();
+        }
+        let (_, replayed) = open_dir(dir.path(), crate::FsyncPolicy::OnCommit).unwrap();
+        assert_eq!(
+            replayed.iter().map(|b| b.rev).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "nothing acked may be discarded"
+        );
+        assert!(
+            !dir.path().join("wal").join("wal.corrupt").exists(),
+            "a rolled-back append leaves nothing to quarantine"
+        );
+    }
+
+    /// Failing at a *payload* byte rather than in the header is the same
+    /// contract: the frame's length prefix is already on disk and would
+    /// otherwise make replay read past the tear.
+    #[test]
+    fn failed_append_mid_payload_is_also_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let (mut w, _) = open_dir(dir.path(), crate::FsyncPolicy::OnCommit).unwrap();
+            w.append(&batch(1)).unwrap();
+            w.fail_after_bytes = Some(HEADER_LEN + 1);
+            assert!(w.append(&batch(2)).is_err());
+            w.append(&batch(2)).unwrap();
+        }
+        let (_, replayed) = open_dir(dir.path(), crate::FsyncPolicy::OnCommit).unwrap();
+        assert_eq!(
+            replayed.iter().map(|b| b.rev).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    /// A `Wal` whose rollback failed refuses every later append rather than
+    /// writing a good frame after a tear it could not remove.
+    #[test]
+    fn a_poisoned_wal_refuses_further_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut w, _) = open_dir(dir.path(), crate::FsyncPolicy::OnCommit).unwrap();
+        w.append(&batch(1)).unwrap();
+        // The only way `rollback` poisons is a `set_len` that fails, which no
+        // portable test can force on a healthy tmpdir; the state it leaves is
+        // set directly, and the refusal it must produce is asserted here.
+        w.poisoned = true;
+        match w.append(&batch(2)) {
+            Err(ClogError::Storage(e)) => assert!(e.to_string().contains("poisoned")),
+            other => panic!("expected a poisoned Storage error, got {other:?}"),
+        }
+        // Nothing was written: the log still holds only the first frame.
+        drop(w);
+        let (_, replayed) = open_dir(dir.path(), crate::FsyncPolicy::OnCommit).unwrap();
+        assert_eq!(replayed.iter().map(|b| b.rev).collect::<Vec<_>>(), vec![1]);
     }
 
     #[test]
