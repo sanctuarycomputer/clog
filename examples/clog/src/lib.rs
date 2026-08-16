@@ -19,3 +19,6 @@ pub(crate) mod score;
 /// Belief resolution: the total order that decides which claim is believed
 /// per subject (spec §5.3).
 pub(crate) mod belief;
+
+/// Depth-1 entity alias map with write-time flattening (spec §5.2).
+pub(crate) mod alias;
