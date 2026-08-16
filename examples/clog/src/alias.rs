@@ -60,6 +60,12 @@ impl AliasMap {
 
     /// Removes any alias edge for `alias`, un-merging it back to its own
     /// identity.
+    // Not called from production code: the engine treats the alias map as a
+    // view and rebuilds it from the live merge claims rather than dropping
+    // single edges (§5.2), because a dropped edge cannot restore whatever
+    // write-time flattening overwrote. Kept as `insert`'s inverse and
+    // exercised by this module's tests.
+    #[allow(dead_code)]
     pub(crate) fn remove(&mut self, alias: &EntityKey) {
         self.edges.remove(alias);
     }
