@@ -87,11 +87,11 @@ pub(crate) struct Batch {
 /// an all-floored group: every candidate fell below the belief threshold).
 /// `urgent` vectors are sorted score-desc, tie `claim_key`-asc, truncated to
 /// the scope's `top_k`.
-// Most fields are not yet read by production code: WorldViews is populated
-// and queried by the naive engine (Task 11) and later ranking/rendering
-// tasks. Exercised directly by this module's tests in the meantime.
+// Populated by the naive engine; most fields are not yet *read* by
+// production code (select/render consume them in later tasks). Exercised
+// directly by this module's and `naive`'s tests in the meantime.
 #[allow(dead_code)]
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct WorldViews {
     /// All live claims, keyed by `claim_key`, including reserved `clog:*` ones.
     pub claims: OrdMap<String, StoredClaim>,
@@ -112,7 +112,7 @@ pub(crate) struct WorldViews {
     pub names: OrdMap<EntityKey, (u64, String)>,
     /// The winning claim key per subject, or `None` for an all-floored group.
     pub believed: OrdMap<String, Option<String>>,
-    /// Subject keys with an open (unresolved) loop kind.
+    /// Claim keys whose kind is one of the configured loop kinds (§5.7).
     pub open_loops: OrdSet<String>,
     /// Per-scope urgent rows: `(score, claim_key)`, sorted score-desc, tie
     /// `claim_key`-asc, truncated to the scope's `top_k`.
@@ -125,8 +125,8 @@ pub(crate) struct WorldViews {
 /// auditable oracle; see the build design §5); `touched=false` short-circuits
 /// when a batch applied zero effective events. Richer per-view diffs arrive
 /// in P2 when wakes need them.
-// Not yet constructed by production code: returned by `Engine::apply`,
-// implemented by the naive engine in Task 11.
+// `touched` is not yet read by production code: the actor (a later task)
+// short-circuits re-render on it. Exercised by `naive`'s tests meanwhile.
 #[allow(dead_code)]
 pub(crate) struct ApplyResult {
     /// Whether the batch had any observable effect on `WorldViews`.
@@ -135,8 +135,8 @@ pub(crate) struct ApplyResult {
 
 /// The engine contract: applies WAL events to the materialized views and
 /// exposes the current snapshot for reading.
-// Not yet implemented by production code: the naive engine (Task 11) is the
-// first implementor.
+// Not yet called from production code: the actor (a later task) drives the
+// naive engine through this trait. Exercised by `naive`'s tests meanwhile.
 #[allow(dead_code)]
 pub(crate) trait Engine: Send {
     /// Applies `events` to the materialized views, using `scopes` to

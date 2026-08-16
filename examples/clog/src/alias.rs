@@ -15,14 +15,10 @@ pub(crate) type EntityKey = (String, String);
 
 /// A depth-1 alias map from entity key to its canonical entity key.
 #[derive(Clone, Default)]
-// Not yet called from production code: wired into the ranking engine by a
-// later task. Exercised directly by this module's tests in the meantime.
-#[allow(dead_code)]
 pub(crate) struct AliasMap {
     edges: OrdMap<EntityKey, EntityKey>,
 }
 
-#[allow(dead_code)]
 impl AliasMap {
     /// Resolves `k` to its canonical key: one hop, since edges are depth-1
     /// by construction. Identity if `k` has no alias edge.
@@ -69,6 +65,9 @@ impl AliasMap {
     }
 
     /// Iterates over the raw alias edges.
+    // Not yet called from production code: consumed by the entity-state
+    // renderer in a later task. Exercised by this module's tests meanwhile.
+    #[allow(dead_code)]
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&EntityKey, &EntityKey)> {
         self.edges.iter()
     }

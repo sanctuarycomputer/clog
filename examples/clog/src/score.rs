@@ -13,9 +13,6 @@ const TRUST_TABLE: [f32; 6] = [1.00, 0.90, 0.75, 0.50, 0.25, 0.10];
 
 /// Combines a source's reliability and a claim's credibility into a single
 /// trust multiplier in `(0, 1]`, per §5.4's fixed Admiralty table.
-// Not yet called from production code: wired into the ranking engine by a
-// later task. Exercised directly by this module's tests in the meantime.
-#[allow(dead_code)]
 pub(crate) fn trust(r: Reliability, c: Credibility) -> f32 {
     TRUST_TABLE[r.rank() as usize] * TRUST_TABLE[c.rank() as usize]
 }
@@ -26,9 +23,6 @@ pub(crate) fn trust(r: Reliability, c: Credibility) -> f32 {
 /// Bucket width is `half_life_days / buckets_per_half_life`. A negative age
 /// (an `occurred_at` in the future, after clamping) is treated as age zero,
 /// clamping to the first bucket's midpoint.
-// Not yet called from production code: wired into the ranking engine by a
-// later task. Exercised directly by this module's tests in the meantime.
-#[allow(dead_code)]
 pub(crate) fn bucket_age_days(age_days: f32, half_life_days: f32, buckets_per_half_life: u32) -> f32 {
     let w = half_life_days / buckets_per_half_life as f32;
     if age_days < 0.0 {
@@ -38,9 +32,6 @@ pub(crate) fn bucket_age_days(age_days: f32, half_life_days: f32, buckets_per_ha
 }
 
 /// Exponential recency decay: `0.5 ^ (bucket_age / half_life_days)`.
-// Not yet called from production code: wired into the ranking engine by a
-// later task. Exercised directly by this module's tests in the meantime.
-#[allow(dead_code)]
 pub(crate) fn recency(bucket_age: f32, half_life_days: f32) -> f32 {
     0.5f32.powf(bucket_age / half_life_days)
 }
@@ -50,9 +41,6 @@ pub(crate) fn recency(bucket_age: f32, half_life_days: f32) -> f32 {
 /// the product of every focus boost whose entity key appears in
 /// `canonical_entities` (the claim's entity keys, post-alias-resolution,
 /// supplied by the caller).
-// Not yet called from production code: wired into the ranking engine by a
-// later task. Exercised directly by this module's tests in the meantime.
-#[allow(dead_code)]
 pub(crate) fn score_claim(
     claim: &Claim,
     kind: Option<&str>,

@@ -8,9 +8,6 @@ use crate::types::{Claim, Credibility};
 
 /// One member of a subject group being resolved for belief: the claim plus
 /// when clog recorded it (used as a tiebreaker in the total order).
-// Not yet called from production code: wired into the ranking engine by a
-// later task. Exercised directly by this module's tests in the meantime.
-#[allow(dead_code)]
 pub(crate) struct BeliefInput<'a> {
     /// The candidate claim.
     pub claim: &'a Claim,
@@ -21,9 +18,6 @@ pub(crate) struct BeliefInput<'a> {
 /// The §5.3 total order as a max-key: later `occurred_at` wins; tie goes to
 /// better reliability, then better credibility, then later `recorded_at`,
 /// then the lexicographically larger `claim_key`.
-// Not yet called from production code: wired into the ranking engine by a
-// later task. Exercised directly by this module's tests in the meantime.
-#[allow(dead_code)]
 pub(crate) fn belief_key(c: &BeliefInput) -> (u64, std::cmp::Reverse<u8>, std::cmp::Reverse<u8>, u64, String) {
     (
         c.claim.occurred_at,
@@ -42,9 +36,6 @@ pub(crate) fn belief_key(c: &BeliefInput) -> (u64, std::cmp::Reverse<u8>, std::c
 /// and the group has two or more members, nobody is believed and `None` is
 /// returned. Otherwise the winner is the max by [`belief_key`] among the
 /// eligible members.
-// Not yet called from production code: wired into the ranking engine by a
-// later task. Exercised directly by this module's tests in the meantime.
-#[allow(dead_code)]
 pub(crate) fn resolve<'a>(group: &[BeliefInput<'a>], floor: Credibility) -> Option<&'a Claim> {
     let eligible: Vec<&BeliefInput<'a>> = group.iter().filter(|c| c.claim.credibility.rank() <= floor.rank()).collect();
 
