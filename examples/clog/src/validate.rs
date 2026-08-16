@@ -187,19 +187,28 @@ mod tests {
             (Box::new(|c| c.claim_key = "clog:evil".into()), false, "reserved"),
             (Box::new(|c| c.claim_key = "has\u{0007}bell".into()), false, "control"),
             (Box::new(|c| c.subject_key = Some("x".repeat(257))), false, "subject_key"),
+            (Box::new(|c| c.subject_key = Some("has\u{0007}bell".into())), false, "control"),
             (Box::new(|c| c.source_ref = "".into()), false, "source_ref"),
             (Box::new(|c| c.source_ref = "x".repeat(1025)), false, "source_ref"),
+            (Box::new(|c| c.source_ref = "has\u{0007}bell".into()), false, "control"),
             (Box::new(|c| c.observer = ObserverId(String::new())), false, "observer"),
             (Box::new(|c| c.observer = ObserverId("x".repeat(129))), false, "observer"),
             (Box::new(|c| c.body = "   ".into()), false, "body"),
             (Box::new(|c| c.body = "x".repeat(16 * 1024 + 1)), false, "body"),
             (Box::new(|c| c.entities = vec![EntityRef { etype: "p".into(), id: "i".into(), name: None }; 33]), false, "entities"),
             (Box::new(|c| c.entities = vec![EntityRef { etype: "".into(), id: "i".into(), name: None }]), false, "etype"),
+            (Box::new(|c| c.entities = vec![EntityRef { etype: "x".repeat(129), id: "i".into(), name: None }]), false, "etype"),
             (Box::new(|c| c.entities = vec![EntityRef { etype: "p".into(), id: "x".repeat(129), name: None }]), false, "id"),
+            (Box::new(|c| c.entities = vec![EntityRef { etype: "p".into(), id: "".into(), name: None }]), false, "id"),
             (Box::new(|c| c.occurred_at = 0), false, "occurred_at"),
             (Box::new(|c| c.observed_at = 0), false, "observed_at"),
             // occurred_at > observed_at is ALLOWED (predictions)
             (Box::new(|c| { c.occurred_at = 10; c.observed_at = 5; }), true, ""),
+            // valid subject_key + non-empty entities vec
+            (Box::new(|c| {
+                c.subject_key = Some("valid-subject".into());
+                c.entities = vec![EntityRef { etype: "project".into(), id: "halcyon".into(), name: None }];
+            }), true, ""),
         ];
         for (i, (mutate, ok, why)) in cases.iter().enumerate() {
             let mut c = tests_base_claim();
@@ -232,6 +241,14 @@ mod tests {
         assert!(validate_focus(&Focus::uniform().weight("risk", 0.0), &tax).is_err());
         assert!(validate_focus(&Focus::uniform().half_life_days(0.005), &tax).is_err());
         assert!(validate_focus(&Focus::uniform().half_life_days(4000.0), &tax).is_err());
+        // half-life bounds are exclusive: exactly the endpoints must fail.
+        assert!(validate_focus(&Focus::uniform().half_life_days(0.01), &tax).is_err());
+        assert!(validate_focus(&Focus::uniform().half_life_days(3650.0), &tax).is_err());
+        // boost factors: valid, NaN, zero.
+        let e = EntityRef { etype: "p".into(), id: "x".into(), name: None };
+        assert!(validate_focus(&Focus::uniform().boost(e.clone(), 1.5), &tax).is_ok());
+        assert!(validate_focus(&Focus::uniform().boost(e.clone(), f32::NAN), &tax).is_err());
+        assert!(validate_focus(&Focus::uniform().boost(e, 0.0), &tax).is_err());
     }
 
     #[test]
