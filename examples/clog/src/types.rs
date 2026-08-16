@@ -453,7 +453,9 @@ pub struct Config {
     pub wal_fsync: FsyncPolicy,
     /// The bounded write queue depth.
     pub write_queue: usize,
-    /// Whether materialized views are rebuilt from the WAL on open.
+    /// If `true`, drops cached engine state and rebuilds materialized views
+    /// by replaying the WAL from scratch on open, rather than resuming from
+    /// the persisted cache.
     pub rebuild_on_open: bool,
 }
 
@@ -472,7 +474,7 @@ impl Config {
             belief_min_credibility: Credibility::Six,
             wal_fsync: FsyncPolicy::OnCommit,
             write_queue: 1024,
-            rebuild_on_open: true,
+            rebuild_on_open: false,
         }
     }
 }
