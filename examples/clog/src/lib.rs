@@ -30,3 +30,7 @@ pub(crate) mod kinds;
 /// Deterministic rendering: template parsing, RFC3339 timestamps, and (in
 /// a later task) the slot renderer itself (spec §5.8).
 pub(crate) mod render;
+
+/// Engine contract: the WAL wire format, the materialized-view snapshot,
+/// and the `Engine` trait the naive engine and WAL build on (spec §5).
+pub(crate) mod engine;
