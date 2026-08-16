@@ -109,9 +109,12 @@ pub(crate) struct NaiveEngine {
     cfg: NaiveCfg,
 }
 
-#[allow(dead_code)]
 impl NaiveEngine {
     /// An engine over an empty world.
+    // Not yet called from production code: the actor (a later task)
+    // constructs one. Exercised by this module's tests in the meantime;
+    // every other method here is reachable through the `Engine` impl.
+    #[allow(dead_code)]
     pub(crate) fn new(cfg: NaiveCfg) -> Self {
         NaiveEngine { views: WorldViews::default(), cfg }
     }
@@ -158,8 +161,10 @@ impl NaiveEngine {
     /// Upserts a kind classification and moves the claim between the
     /// `unclassified` and `open_loops` views. Judging a claim that is not
     /// live is a no-op: a dead claim must leave no trace behind (INV-3).
+    /// Judging a reserved claim is likewise a no-op: `clog:*` keys stay out
+    /// of every view, `kinds` included (INV-8).
     fn judge(&mut self, claim_key: &str, kind: &str, confidence: f32, source: JudgeSource) -> bool {
-        if !self.views.claims.contains_key(claim_key) {
+        if !self.views.claims.contains_key(claim_key) || is_reserved(claim_key) {
             return false;
         }
         self.views.kinds.insert(
@@ -472,5 +477,10 @@ mod tests {
         assert!(e.views().unclassified.is_empty());
         // but the alias took effect
         assert_eq!(e.views().aliases.resolve(&("p".into(), "a".into())), ("p".into(), "b".into()));
+
+        // INV-8 covers `kinds` too: a reserved claim cannot be judged into a view.
+        e.apply(&[Event::Judge { claim_key: "clog:merge:p:a->p:b".into(), kind: "risk".into(), confidence: 1.0, source: JudgeSource::Rule }], &scopes(), 101);
+        assert!(e.views().kinds.is_empty());
+        assert!(e.views().open_loops.is_empty());
     }
 }

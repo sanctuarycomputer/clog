@@ -102,11 +102,20 @@ pub(crate) fn validate_claim(index: usize, c: &Claim, allow_reserved: bool) -> R
         if e.etype.len() > 128 {
             return Err(invalid(index, "entity etype must be <= 128 bytes"));
         }
+        // Entity keys are joined with the ASCII unit separator in reserved
+        // merge-claim bodies (see `engine::naive`); banning control chars
+        // here is what makes that encoding unambiguous.
+        if has_control(&e.etype) {
+            return Err(invalid(index, "entity etype must not contain control characters"));
+        }
         if e.id.trim().is_empty() {
             return Err(invalid(index, "entity id must be non-empty"));
         }
         if e.id.len() > 128 {
             return Err(invalid(index, "entity id must be <= 128 bytes"));
+        }
+        if has_control(&e.id) {
+            return Err(invalid(index, "entity id must not contain control characters"));
         }
     }
 
@@ -200,6 +209,9 @@ mod tests {
             (Box::new(|c| c.entities = vec![EntityRef { etype: "x".repeat(129), id: "i".into(), name: None }]), false, "etype"),
             (Box::new(|c| c.entities = vec![EntityRef { etype: "p".into(), id: "x".repeat(129), name: None }]), false, "id"),
             (Box::new(|c| c.entities = vec![EntityRef { etype: "p".into(), id: "".into(), name: None }]), false, "id"),
+            (Box::new(|c| c.entities = vec![EntityRef { etype: "has\u{0007}bell".into(), id: "i".into(), name: None }]), false, "control"),
+            // U+001F is the merge-claim body separator: it must never reach an entity key.
+            (Box::new(|c| c.entities = vec![EntityRef { etype: "p".into(), id: "a\u{001f}b".into(), name: None }]), false, "control"),
             (Box::new(|c| c.occurred_at = 0), false, "occurred_at"),
             (Box::new(|c| c.observed_at = 0), false, "observed_at"),
             // occurred_at > observed_at is ALLOWED (predictions)
