@@ -9,3 +9,6 @@
 /// Public API types: the serde-only contract every later task builds on.
 pub mod types;
 pub use types::*;
+
+/// Observe-time validation rules (spec §10).
+pub(crate) mod validate;
