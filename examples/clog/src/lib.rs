@@ -34,3 +34,7 @@ pub(crate) mod render;
 /// Engine contract: the WAL wire format, the materialized-view snapshot,
 /// and the `Engine` trait the naive engine and WAL build on (spec §5).
 pub(crate) mod engine;
+
+/// The append-only write-ahead log: clog's source of truth (spec §6.3,
+/// INV-11, recovery test R2).
+pub(crate) mod wal;
