@@ -22,3 +22,7 @@ pub(crate) mod belief;
 
 /// Depth-1 entity alias map with write-time flattening (spec §5.2).
 pub(crate) mod alias;
+
+/// Rules-tier classifier: the free, deterministic first tier of the
+/// cascade classifier (spec §5.6).
+pub(crate) mod kinds;
