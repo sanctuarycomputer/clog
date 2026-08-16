@@ -5,8 +5,8 @@
 //! bounded channel and blocks on a one-shot reply, so writes are totally
 //! ordered and backpressure is just a blocking send. Readers never touch
 //! this thread: after each batch the writer publishes an immutable
-//! [`WorldSnapshot`] through [`ArcSwap`], and `situation` (and, from Task
-//! 15, `select`) read that snapshot and nothing else (INV-1).
+//! [`WorldSnapshot`] through [`ArcSwap`], and `situation` and [`select`]
+//! read that snapshot and nothing else (INV-1).
 //!
 //! **Write-ahead ordering is mandatory** (§6.3): the WAL append (and its
 //! fsync) completes *before* `engine.apply`, so a crash can only ever lose
@@ -18,7 +18,7 @@
 //! application — the classifier never runs on replay — so the same WAL
 //! bytes always rebuild the same world (INV-10).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -26,20 +26,36 @@ use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender, bounded};
 use imbl::OrdMap;
 
+use crate::alias::EntityKey;
 use crate::clock::Clock;
-use crate::engine::naive::{NaiveCfg, NaiveEngine, entity_state};
+use crate::engine::naive::{NaiveCfg, NaiveEngine, entity_state, is_reserved};
 use crate::engine::{Batch, Engine, Event, StoredClaim, WorldViews};
 use crate::kinds::{self, RuleSet};
 use crate::render::template::{DEFAULT_TEMPLATE, Template, parse};
 use crate::render::time::rfc3339_utc;
 use crate::render::{ChangeItem, EntityItem, LoopItem, SlotInputs, UrgentItem, headline, render};
-use crate::types::{Ack, Claim, ClogError, Config, Focus, ObserveOpts, Rev, Situation};
+use crate::types::{
+    Ack, Claim, ClogError, Config, Credibility, EntityRef, Filter, Focus, ObserveOpts, ObserverId, Reliability, Rev,
+    Row, Situation, View,
+};
 use crate::validate::{validate_claim, validate_focus};
 use crate::wal::{self, Wal};
 
 /// The scope every instance always has (build design §9): a uniform focus,
 /// used whenever `situation(None, ..)` is called.
 pub(crate) const DEFAULT_SCOPE: &str = "default";
+
+/// The observer every claim clog writes about itself carries (INV-8).
+const CLOG_OBSERVER: &str = "clog";
+/// The `source_ref` of a merge claim.
+const MERGE_SOURCE_REF: &str = "clog:merge";
+/// The field separator inside a merge claim's body (ASCII unit separator);
+/// see `engine::naive` for the wire format this half writes.
+const MERGE_SEP: &str = "\u{1f}";
+/// `select`'s row cap when the caller names none.
+const DEFAULT_LIMIT: usize = 50;
+/// The largest row cap `select` will honour, whatever the caller asks for.
+const MAX_LIMIT: usize = 500;
 
 // ---- commands -------------------------------------------------------------
 
@@ -75,6 +91,18 @@ pub(crate) enum WriteOp {
         /// The key to retract.
         claim_key: String,
     },
+    /// `Clog::revoke_observer`.
+    RevokeObserver {
+        /// The observer whose every claim is withdrawn.
+        observer: ObserverId,
+    },
+    /// `Clog::merge_entities`.
+    Merge {
+        /// The entity being merged away.
+        alias: EntityRef,
+        /// The entity it becomes.
+        canonical: EntityRef,
+    },
 }
 
 // ---- published state ------------------------------------------------------
@@ -105,11 +133,10 @@ pub(crate) struct SituationState {
 
 /// The immutable world as of one committed batch, published atomically.
 ///
-/// Every field is part of the published contract (spec §6.1), but P1's only
-/// reader is `situation`, which needs `situations` alone: a document already
-/// carries its own rev and as_of. The rest is read by `select` (Task 15) and
-/// by wake evaluation (P2); it is published now so readers never have to ask
-/// the writer a question.
+/// Every field is part of the published contract (spec §6.1). `situation`
+/// reads `situations`, `select` reads `views` and `scopes`; `rev` and `as_of`
+/// are published for wake evaluation (P2) so readers never have to ask the
+/// writer a question — a rendered document already carries its own pair.
 pub(crate) struct WorldSnapshot {
     /// The global rev this snapshot reflects.
     #[allow(dead_code)]
@@ -118,12 +145,8 @@ pub(crate) struct WorldSnapshot {
     #[allow(dead_code)]
     pub as_of: u64,
     /// The engine's materialized views.
-    // Read by `select` (Task 15); the situation path reads `situations`.
-    #[allow(dead_code)]
     pub views: WorldViews,
     /// The scopes in force, `"default"` always present.
-    // Read by `set_focus`/`select` (Tasks 15+).
-    #[allow(dead_code)]
     pub scopes: BTreeMap<String, Focus>,
     /// The rendered document per scope. Behind `Arc` so publishing a
     /// snapshot copies one pointer per scope rather than deep-cloning every
@@ -297,6 +320,8 @@ impl Writer {
         match op {
             WriteOp::Observe { claims, opts } => self.observe(claims, opts),
             WriteOp::Retract { claim_key } => self.retract(claim_key),
+            WriteOp::RevokeObserver { observer } => self.revoke_observer(observer),
+            WriteOp::Merge { alias, canonical } => self.merge_entities(&alias, &canonical),
         }
     }
 
@@ -333,6 +358,87 @@ impl Writer {
         }
         let now = self.clock.now_ms();
         self.commit(vec![Event::Retract { claim_key }], None, now)
+    }
+
+    /// `Clog::revoke_observer`: **one** `Revoke` event, so however many
+    /// claims the observer had, they all go in a single batch at a single
+    /// rev (INV-6). The engine expands the event into the individual
+    /// retractions in `claim_key` order, so replay is deterministic.
+    ///
+    /// An observer with nothing live commits nothing at all — no batch, no
+    /// rev, no WAL record — and returns the current rev, exactly as a wholly
+    /// duplicate `observe` does (INV-5). Revoking is therefore idempotent:
+    /// the second call is invisible rather than an error.
+    fn revoke_observer(&mut self, observer: ObserverId) -> Result<Ack, ClogError> {
+        if !self.engine.views().by_observer.contains_key(&observer.0) {
+            return Ok(self.ack(None));
+        }
+        let now = self.clock.now_ms();
+        self.commit(vec![Event::Revoke { observer }], None, now)
+    }
+
+    /// `Clog::merge_entities`: writes the reserved claim that *is* the alias
+    /// edge (spec §5.2, §4).
+    ///
+    /// The cycle pre-check runs here, against the engine's own alias map,
+    /// rather than on the caller's snapshot: the writer is the only thread
+    /// that can change that map, so a check made here cannot be stale by the
+    /// time the batch commits. A cycle rejects the call and commits nothing.
+    ///
+    /// The claim is validated with `allow_reserved`, and validated *with*
+    /// the two entity refs attached so §10's entity rules (non-empty, length,
+    /// no control characters — including the unit separator this body is
+    /// joined with) actually run over them. It is then committed with
+    /// `entities` **empty**: a reserved claim must not enter `by_entity` or
+    /// the display-name registry, or merging would invent a mention that no
+    /// host ever made (INV-8).
+    ///
+    /// Re-merging the same pair is a no-op under INV-5 only while the claim
+    /// it would write is byte-identical to the live one. `occurred_at` and
+    /// `observed_at` are the writer's clock reading, so a re-merge under a
+    /// moving (`System`) clock does supersede the live claim and take a rev;
+    /// the alias map it rebuilds from is unchanged either way.
+    fn merge_entities(&mut self, alias: &EntityRef, canonical: &EntityRef) -> Result<Ack, ClogError> {
+        let (alias_key, canonical_key) = (alias.key(), canonical.key());
+        // U-ALIAS-2: the edge is inserted flattened, so it cycles exactly
+        // when the flattened target is the alias itself (`b -> a` after
+        // `a -> b`, or the self-loop `a -> a`).
+        if self.engine.views().aliases.flatten_target(&canonical_key) == alias_key {
+            return Err(ClogError::AliasCycle);
+        }
+
+        let now = self.clock.now_ms();
+        let mut claim = Claim {
+            claim_key: format!("clog:merge:{}:{}->{}:{}", alias_key.0, alias_key.1, canonical_key.0, canonical_key.1),
+            subject_key: None,
+            source_ref: MERGE_SOURCE_REF.to_string(),
+            observer: ObserverId::from(CLOG_OBSERVER),
+            schema_v: 1,
+            occurred_at: now,
+            observed_at: now,
+            reliability: Reliability::A,
+            credibility: Credibility::One,
+            entities: vec![alias.clone(), canonical.clone()],
+            body: [&alias_key.0, &alias_key.1, &canonical_key.0, &canonical_key.1]
+                .map(String::as_str)
+                .join(MERGE_SEP),
+        };
+        validate_claim(0, &claim, true)?;
+        claim.entities.clear();
+
+        // The same upsert expansion `observe` uses, minus the rules tier: a
+        // reserved claim is never classified (INV-8), so running the
+        // classifier could only ever write a `Judge` the engine discards.
+        let live = self.engine.views().claims.get(&claim.claim_key).map(|sc| &sc.claim);
+        let events = match live {
+            Some(old) if *old == claim => Vec::new(),
+            Some(_) => vec![
+                Event::Retract { claim_key: claim.claim_key.clone() },
+                Event::Observe(StoredClaim { claim, recorded_at: now }),
+            ],
+            None => vec![Event::Observe(StoredClaim { claim, recorded_at: now })],
+        };
+        self.commit(events, None, now)
     }
 
     /// Write-path step 3 (upsert expansion) and step 4 (rules tier).
@@ -515,6 +621,178 @@ impl Writer {
             scopes: self.scopes.clone(),
             situations: self.situations.clone(),
         }));
+    }
+}
+
+// ---- select ---------------------------------------------------------------
+
+/// `Clog::select`, run entirely on one published snapshot (INV-1).
+///
+/// Nothing here touches the writer: the view's own ordering is already
+/// materialized, so selecting is iterate → filter → cap → hydrate, and two
+/// selects over the same snapshot always agree.
+///
+/// Each view supplies its own order — `Live`/`OpenLoops`/`Unclassified` by
+/// `claim_key` ascending (they are ordered maps and sets), `Urgent` by rank,
+/// `EntityState` by (canonical entity, subject). Reserved `clog:*` claims are
+/// skipped by every one of them (INV-8): a merge claim is clog's own
+/// bookkeeping and is not a row a host may read.
+///
+/// Filters are all optional and AND-composed. `min_score` is the exception
+/// to "optional": it only *means* anything where a score exists, so pairing
+/// it with any view but `Urgent` is a malformed request rather than a filter
+/// that silently matches everything.
+pub(crate) fn select(snapshot: &WorldSnapshot, view: View, filter: Filter) -> Result<Vec<Row>, ClogError> {
+    if filter.min_score.is_some() && !matches!(view, View::Urgent { .. }) {
+        return Err(ClogError::InvalidFilter {
+            reason: "min_score is only meaningful for View::Urgent".into(),
+        });
+    }
+    let views = &snapshot.views;
+    let limit = filter.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
+    // Resolved once, and the claim side is resolved per row below: a filter
+    // may name an entity the way the host knows it while the claim names the
+    // one it was merged into, or vice versa (§5.2 — every view that filters
+    // by entity resolves through the alias map).
+    let wanted: Option<BTreeSet<EntityKey>> = filter
+        .entities
+        .as_ref()
+        .map(|entities| entities.iter().map(|e| views.aliases.resolve(&e.key())).collect());
+
+    // `(claim_key, stored claim, score)` in the view's order. Scores exist
+    // only in `urgent`, which is the only view that ranks.
+    let ordered: Vec<(&str, &StoredClaim, Option<f32>)> = match &view {
+        View::Live => views
+            .claims
+            .iter()
+            .filter(|(key, _)| !is_reserved(key))
+            .map(|(key, stored)| (key.as_str(), stored, None))
+            .collect(),
+        View::OpenLoops => by_key(views, views.open_loops.iter()),
+        View::Unclassified => by_key(views, views.unclassified.iter()),
+        View::Urgent { scope } => {
+            // Checked against `scopes` rather than against `urgent`, so an
+            // unknown scope is an error even in the (unreachable) case of a
+            // scope with no ranked rows at all.
+            if !snapshot.scopes.contains_key(scope) {
+                return Err(ClogError::UnknownScope);
+            }
+            views
+                .urgent
+                .get(scope)
+                .into_iter()
+                .flatten()
+                .filter(|(_, key)| !is_reserved(key))
+                .filter_map(|(score, key)| Some((key.as_str(), views.claims.get(key.as_str())?, Some(*score))))
+                .collect()
+        }
+        // `entity_state` orders its rows newest-first for the renderer; a
+        // selected row set is addressed by key, so subjects are re-sorted
+        // ascending here. One claim can be the believed answer for an entity
+        // under several entities at once, and then it appears once per
+        // entity — the row set is (entity, subject) shaped, not a claim set.
+        View::EntityState => {
+            let mut rows = Vec::new();
+            for (_, _, mut believed) in entity_state(views) {
+                believed.sort_by(|a, b| a.0.cmp(&b.0));
+                for (_, stored) in believed {
+                    // Re-borrowed out of the snapshot so the row keeps the
+                    // snapshot's lifetime rather than `entity_state`'s clone.
+                    if let Some(stored) = views.claims.get(stored.claim.claim_key.as_str()) {
+                        rows.push((stored.claim.claim_key.as_str(), stored, None));
+                    }
+                }
+            }
+            rows
+        }
+    };
+
+    Ok(ordered
+        .into_iter()
+        .filter(|(key, stored, score)| matches_filter(views, key, stored, *score, &filter, wanted.as_ref()))
+        .take(limit)
+        .map(|(key, stored, score)| hydrate(views, key, stored, score))
+        .collect())
+}
+
+/// Looks a view's ordered `claim_key`s up in `claims`, dropping reserved
+/// ones. Keys that name no live claim cannot occur (every view is healed on
+/// retraction, INV-3); they are skipped rather than panicked on.
+fn by_key<'a>(
+    views: &'a WorldViews,
+    keys: impl Iterator<Item = &'a String>,
+) -> Vec<(&'a str, &'a StoredClaim, Option<f32>)> {
+    keys.filter(|key| !is_reserved(key))
+        .filter_map(|key| Some((key.as_str(), views.claims.get(key.as_str())?, None)))
+        .collect()
+}
+
+/// Whether one row survives every filter the caller set (AND-composed).
+///
+/// A filter a row *cannot* answer excludes it: an unclassified claim never
+/// matches a `kinds` filter, and a claim with no `subject_key` never matches
+/// a `subject_prefix`. `occurred_after` is strict.
+fn matches_filter(
+    views: &WorldViews,
+    key: &str,
+    stored: &StoredClaim,
+    score: Option<f32>,
+    filter: &Filter,
+    wanted: Option<&BTreeSet<EntityKey>>,
+) -> bool {
+    let claim = &stored.claim;
+    if let Some(kinds) = &filter.kinds
+        && !views.kinds.get(key).is_some_and(|label| kinds.contains(&label.kind))
+    {
+        return false;
+    }
+    if let Some(wanted) = wanted
+        && !claim.entities.iter().any(|e| wanted.contains(&views.aliases.resolve(&e.key())))
+    {
+        return false;
+    }
+    if let Some(observer) = &filter.observer
+        && claim.observer != *observer
+    {
+        return false;
+    }
+    if let Some(prefix) = &filter.subject_prefix
+        && !claim.subject_key.as_ref().is_some_and(|s| s.starts_with(prefix.as_str()))
+    {
+        return false;
+    }
+    if let Some(after) = filter.occurred_after
+        && claim.occurred_at <= after
+    {
+        return false;
+    }
+    if let Some(min) = filter.min_score
+        && !score.is_some_and(|s| s >= min)
+    {
+        return false;
+    }
+    true
+}
+
+/// Builds one [`Row`] from the snapshot: the claim and its arrival time as
+/// stored, its kind if it has one, its rank score if the view ranks, and
+/// whether it is the believed answer for its subject.
+///
+/// `believed` is `None` — "not applicable" — for a claim with no
+/// `subject_key`, because belief is resolved per subject group and a claim
+/// outside every group is neither believed nor disbelieved. Within a group,
+/// the losers are `Some(false)`, as is every member of an all-floored group.
+fn hydrate(views: &WorldViews, key: &str, stored: &StoredClaim, score: Option<f32>) -> Row {
+    Row {
+        claim: stored.claim.clone(),
+        recorded_at: stored.recorded_at,
+        kind: views.kinds.get(key).cloned(),
+        score,
+        believed: stored
+            .claim
+            .subject_key
+            .as_deref()
+            .map(|subject| matches!(views.believed.get(subject), Some(Some(winner)) if winner == key)),
     }
 }
 

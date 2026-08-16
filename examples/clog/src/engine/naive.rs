@@ -48,7 +48,7 @@ const MERGE_SEP: char = '\u{1f}';
 const ENTITY_STATE_ROWS: usize = 8;
 
 /// Whether `claim_key` is in the reserved namespace (INV-8).
-fn is_reserved(claim_key: &str) -> bool {
+pub(crate) fn is_reserved(claim_key: &str) -> bool {
     claim_key.starts_with(RESERVED_PREFIX)
 }
 

@@ -193,6 +193,120 @@ impl Clog {
         self.write(WriteOp::Retract { claim_key: claim_key.to_string() })
     }
 
+    /// Withdraws everything an observer ever said, in one batch.
+    ///
+    /// This is the integration kill switch (spec §5.1, INV-6): a misbehaving
+    /// or decommissioned source is removed wholesale, and every view it
+    /// appeared in heals as if it had never written (INV-3). However many
+    /// claims it had, the revocation is a single revision — hosts can rely
+    /// on there being no intermediate state in which the observer is
+    /// half-gone. Its reserved `clog:*` claims go with it, so a merge that
+    /// observer's writes caused is undone too.
+    ///
+    /// An observer with nothing live commits nothing at all and returns the
+    /// current revision, so revoking twice is invisible rather than an error.
+    ///
+    /// ```no_run
+    /// # use clog::*;
+    /// # let handle = Clog::open(Config::default_for("/var/lib/my-agent/clog"))?;
+    /// handle.revoke_observer(&ObserverId::from("gmail-v2"))?;
+    /// # Ok::<(), ClogError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - `ClogError::Storage` / `ClogError::Corrupt` if the log append
+    ///   fails;
+    /// - `ClogError::ShuttingDown` if the instance is stopping.
+    pub fn revoke_observer(&self, observer: &ObserverId) -> Result<Ack, ClogError> {
+        self.write(WriteOp::RevokeObserver { observer: observer.clone() })
+    }
+
+    /// Declares that `alias` and `canonical` are the same entity: every view
+    /// that groups or filters by entity now reports them as one (spec §5.2).
+    ///
+    /// The merge is itself a claim, written in the reserved namespace under
+    /// the key `clog:merge:{alias.etype}:{alias.id}->{canonical.etype}:{canonical.id}`.
+    /// That claim is invisible to `select` and to every rendered document
+    /// (INV-8), but it is a real, logged, retractable claim: passing its key
+    /// to [`Clog::retract`] un-merges the pair and re-keys every view back.
+    ///
+    /// Alias edges are depth-1 — merging onto an entity that is itself
+    /// merged away points at the far end instead — so no chain ever forms
+    /// and resolution is always a single hop. Merging the same pair twice
+    /// commits nothing new.
+    ///
+    /// ```no_run
+    /// # use clog::*;
+    /// # let handle = Clog::open(Config::default_for("/var/lib/my-agent/clog"))?;
+    /// let dup = EntityRef { etype: "person".into(), id: "sam.b".into(), name: None };
+    /// let real = EntityRef { etype: "person".into(), id: "sam".into(), name: None };
+    /// handle.merge_entities(&dup, &real)?;
+    /// // ...and back again
+    /// handle.retract("clog:merge:person:sam.b->person:sam")?;
+    /// # Ok::<(), ClogError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - `ClogError::AliasCycle` if the merge would close a loop — including
+    ///   merging an entity onto itself, or reversing an existing merge
+    ///   without retracting it first. Nothing is written in that case;
+    /// - `ClogError::InvalidClaim` if either entity ref breaks spec §10 (an
+    ///   empty or over-long `etype`/`id`, or a control character in one);
+    /// - `ClogError::Storage` / `ClogError::Corrupt` if the log append
+    ///   fails;
+    /// - `ClogError::ShuttingDown` if the instance is stopping.
+    pub fn merge_entities(&self, alias: &EntityRef, canonical: &EntityRef) -> Result<Ack, ClogError> {
+        self.write(WriteOp::Merge { alias: alias.clone(), canonical: canonical.clone() })
+    }
+
+    /// Reads rows out of one materialized view, filtered.
+    ///
+    /// A pure read of the current snapshot: it never touches the writer, so
+    /// it neither blocks behind in-flight writes nor sees a partially
+    /// applied batch, and two calls at the same revision always agree
+    /// (INV-1).
+    ///
+    /// Each view brings its own order — `Live`, `OpenLoops` and
+    /// `Unclassified` by `claim_key` ascending, `Urgent` by descending rank
+    /// within the named scope, `EntityState` by (canonical entity, subject).
+    /// `EntityState` reports only *believed* claims and reports one per
+    /// (entity, subject), so a claim about several entities appears once for
+    /// each. Reserved `clog:*` claims never appear in any view (INV-8).
+    ///
+    /// Every filter is optional and they are AND-composed; `kinds` and
+    /// `entities` match any of their values. Entity filters resolve through
+    /// the merge map, so filtering on either half of a merged pair finds the
+    /// same rows. `occurred_after` is strict. `limit` defaults to 50 and is
+    /// capped at 500.
+    ///
+    /// ```no_run
+    /// # use clog::*;
+    /// # let handle = Clog::open(Config::default_for("/var/lib/my-agent/clog"))?;
+    /// let rows = handle.select(
+    ///     View::Urgent { scope: "default".into() },
+    ///     Filter { kinds: Some(vec!["risk".into()]), min_score: Some(0.25), ..Filter::default() },
+    /// )?;
+    /// for row in &rows {
+    ///     println!("{:?} {}", row.score, row.claim.body);
+    /// }
+    /// # Ok::<(), ClogError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - `ClogError::InvalidFilter` if `min_score` is set on any view but
+    ///   `View::Urgent`, where no row has a score to compare;
+    /// - `ClogError::UnknownScope` if `View::Urgent` names a scope that does
+    ///   not exist.
+    pub fn select(&self, view: View, filter: Filter) -> Result<Vec<Row>, ClogError> {
+        // `load_full` rather than `load`: hydrating and filtering rows is
+        // caller-sized work, and an `ArcSwap` guard must not be held across
+        // it (the same reason `situation` takes a full load).
+        actor::select(&self.inner.snapshot.load_full(), view, filter)
+    }
+
     /// Reads a scope's situation document from the current snapshot.
     ///
     /// `scope` defaults to `"default"`. `template` defaults to the built-in

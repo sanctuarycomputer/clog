@@ -279,3 +279,207 @@ fn entities_slot_shows_believed_summaries_newest_first() {
     assert!(text.contains("Halcyon: invoice 1042 paid; kickoff moved to may"), "{text}");
     assert!(!text.contains("Halcyon: invoice 1042 overdue"), "{text}");
 }
+
+#[test]
+fn select_live_with_filters() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = Clog::open(cfg(dir.path())).unwrap();
+    c.advance(1_000_000).unwrap();
+    let mut a = claim("a", "alpha", 100_000);
+    a.observer = ObserverId::from("gmail");
+    let mut b = claim("b", "beta", 900_000);
+    b.observer = ObserverId::from("twist");
+    c.observe(vec![a, b], ObserveOpts::default()).unwrap();
+
+    let all = c.select(View::Live, Filter::default()).unwrap();
+    assert_eq!(all.iter().map(|r| r.claim.claim_key.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+    assert!(all[0].recorded_at >= 1_000_000);
+
+    let f = Filter { observer: Some(ObserverId::from("twist")), ..Filter::default() };
+    assert_eq!(c.select(View::Live, f).unwrap().len(), 1);
+
+    let f = Filter { occurred_after: Some(500_000), ..Filter::default() };
+    assert_eq!(c.select(View::Live, f).unwrap()[0].claim.claim_key, "b");
+
+    let f = Filter { min_score: Some(0.1), ..Filter::default() };
+    assert!(matches!(c.select(View::Live, f), Err(ClogError::InvalidFilter { .. })));
+
+    let rows = c.select(View::Urgent { scope: "default".into() }, Filter::default()).unwrap();
+    assert!(rows[0].score.is_some());
+}
+
+#[test]
+fn inv6_revoke_observer_one_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = Clog::open(cfg(dir.path())).unwrap();
+    c.advance(1_000_000).unwrap();
+    let mut a = claim("a", "alpha", 100_000); a.observer = ObserverId::from("gmail");
+    let mut b = claim("b", "beta", 100_000);  b.observer = ObserverId::from("gmail");
+    c.observe(vec![a, b], ObserveOpts::default()).unwrap();
+    let ack = c.revoke_observer(&ObserverId::from("gmail")).unwrap();
+    assert_eq!(ack.rev, 2); // one batch, one rev
+    assert!(c.select(View::Live, Filter::default()).unwrap().is_empty());
+}
+
+#[test]
+fn p7_shape_merge_round_trip_via_api() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = Clog::open(cfg(dir.path())).unwrap();
+    c.advance(1_000_000).unwrap();
+    let mut cl = claim("about-a", "note about a", 100_000);
+    cl.entities = vec![EntityRef { etype: "p".into(), id: "a".into(), name: None }];
+    c.observe(vec![cl], ObserveOpts::default()).unwrap();
+    let before = c.situation(None, None).unwrap();
+
+    let a = EntityRef { etype: "p".into(), id: "a".into(), name: None };
+    let b = EntityRef { etype: "p".into(), id: "b".into(), name: None };
+    c.merge_entities(&a, &b).unwrap();
+    // entity filter follows the alias
+    let f = Filter { entities: Some(vec![b.clone()]), ..Filter::default() };
+    assert_eq!(c.select(View::Live, f).unwrap().len(), 1);
+    // cycle rejected
+    assert!(matches!(c.merge_entities(&b, &a), Err(ClogError::AliasCycle)));
+    // merge claim is invisible (INV-8)
+    assert!(c.select(View::Live, Filter::default()).unwrap().iter().all(|r| !r.claim.claim_key.starts_with("clog:")));
+    // un-merge by retracting the reserved key
+    c.retract("clog:merge:p:a->p:b").unwrap();
+    let after = c.situation(None, None).unwrap();
+    // `norm` rather than the brief's rev-replace: the header also carries
+    // `as_of`, which the merge/un-merge batches moved, and the `changes`
+    // slot legitimately echoes them (see `norm`'s doc comment).
+    assert_eq!(norm(&before), norm(&after));
+}
+
+// Beyond the brief: the filters above are each exercised alone. They are
+// AND-composed, they exclude rows that *cannot* answer them, and `limit`
+// has a default and a ceiling.
+#[test]
+fn select_filters_and_compose_and_limit_is_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = cfg(dir.path());
+    for kd in &mut config.kinds.kinds {
+        if kd.name == "risk" {
+            kd.rules.push(clog::Rule { any_of: vec![clog::Matcher::BodyContains("overdue".into())] });
+        }
+    }
+    let c = Clog::open(config).unwrap();
+    c.advance(1_000_000).unwrap();
+
+    // One row passes everything, and one row fails each clause on its own,
+    // so dropping any single conjunct must let exactly one more through.
+    let row = |key: &str, body: &str, observer: &str, subject: &str, occ: u64| {
+        let mut c = claim(key, body, occ);
+        c.observer = ObserverId::from(observer);
+        c.subject_key = Some(subject.into());
+        c
+    };
+    c.observe(
+        vec![
+            row("hit", "invoice overdue", "gmail", "inv:status", 900_000),
+            row("no-kind", "invoice settled", "gmail", "inv:note", 900_000),
+            row("wrong-observer", "invoice overdue", "twist", "inv:other", 900_000),
+            row("wrong-subject", "rent overdue", "gmail", "rent:status", 900_000),
+            row("too-old", "invoice overdue", "gmail", "inv:history", 100_000),
+            claim("no-subject", "chatter overdue", 900_000),
+        ],
+        ObserveOpts::default(),
+    )
+    .unwrap();
+
+    let all = Filter {
+        kinds: Some(vec!["risk".into()]),
+        observer: Some(ObserverId::from("gmail")),
+        subject_prefix: Some("inv:".into()),
+        occurred_after: Some(500_000),
+        ..Filter::default()
+    };
+    let rows = c.select(View::Live, all.clone()).unwrap();
+    assert_eq!(rows.iter().map(|r| r.claim.claim_key.as_str()).collect::<Vec<_>>(), vec!["hit"]);
+    assert_eq!(c.select(View::Live, Filter { kinds: None, ..all.clone() }).unwrap().len(), 2);
+    assert_eq!(c.select(View::Live, Filter { observer: None, ..all.clone() }).unwrap().len(), 2);
+    assert_eq!(c.select(View::Live, Filter { subject_prefix: None, ..all.clone() }).unwrap().len(), 2);
+    assert_eq!(c.select(View::Live, Filter { occurred_after: None, ..all }).unwrap().len(), 2);
+
+    // a claim with no subject_key cannot answer a subject_prefix filter,
+    // not even the empty one every subject starts with
+    let f = Filter { subject_prefix: Some(String::new()), ..Filter::default() };
+    assert_eq!(c.select(View::Live, f).unwrap().len(), 5);
+    // an unclassified claim cannot answer a kinds filter
+    let f = Filter { kinds: Some(vec!["fyi".into()]), ..Filter::default() };
+    assert!(c.select(View::Live, f).unwrap().is_empty());
+    // occurred_after is strict
+    let f = Filter { occurred_after: Some(900_000), ..Filter::default() };
+    assert!(c.select(View::Live, f).unwrap().is_empty());
+
+    // limit: honoured, and clamped rather than rejected
+    let f = Filter { limit: Some(2), ..Filter::default() };
+    assert_eq!(c.select(View::Live, f).unwrap().len(), 2);
+    let f = Filter { limit: Some(100_000), ..Filter::default() };
+    assert_eq!(c.select(View::Live, f).unwrap().len(), 6);
+
+    assert!(matches!(c.select(View::Urgent { scope: "nope".into() }, Filter::default()), Err(ClogError::UnknownScope)));
+}
+
+// Beyond the brief: `believed` is three-valued, and `EntityState` reports
+// only the winners — the flag and the view must agree.
+#[test]
+fn select_believed_flag_and_entity_state_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = Clog::open(cfg(dir.path())).unwrap();
+    c.advance(1_000_000).unwrap();
+    let entity = EntityRef { etype: "project".into(), id: "halcyon".into(), name: None };
+    let mut loser = claim("a-loser", "invoice overdue", 100_000);
+    loser.subject_key = Some("inv:status".into());
+    loser.entities = vec![entity.clone()];
+    let mut winner = claim("b-winner", "invoice paid", 200_000);
+    winner.subject_key = Some("inv:status".into());
+    winner.entities = vec![entity.clone()];
+    let loose = claim("c-loose", "no subject at all", 200_000);
+    c.observe(vec![loser, winner, loose], ObserveOpts::default()).unwrap();
+
+    let rows = c.select(View::Live, Filter::default()).unwrap();
+    let flags: Vec<(&str, Option<bool>)> =
+        rows.iter().map(|r| (r.claim.claim_key.as_str(), r.believed)).collect();
+    assert_eq!(flags, vec![("a-loser", Some(false)), ("b-winner", Some(true)), ("c-loose", None)]);
+
+    // entity_state carries only the subject's winner, flagged accordingly
+    let rows = c.select(View::EntityState, Filter::default()).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].claim.claim_key, "b-winner");
+    assert_eq!(rows[0].believed, Some(true));
+    // and the entity filter reaches it
+    let f = Filter { entities: Some(vec![entity]), ..Filter::default() };
+    assert_eq!(c.select(View::EntityState, f).unwrap().len(), 1);
+}
+
+// Beyond the brief: revoking an observer with nothing live must be as
+// invisible as a duplicate observe (INV-5), not an error.
+#[test]
+fn revoke_of_an_unknown_observer_commits_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = Clog::open(cfg(dir.path())).unwrap();
+    c.advance(1_000_000).unwrap();
+    let ack = c.observe(vec![claim("a", "x", 500_000)], ObserveOpts::default()).unwrap();
+    assert_eq!(c.revoke_observer(&ObserverId::from("nobody")).unwrap().rev, ack.rev);
+    let done = c.revoke_observer(&ObserverId::from("test")).unwrap();
+    assert_eq!(done.rev, ack.rev + 1);
+    // and again: now there is nothing left, so it is a no-op
+    assert_eq!(c.revoke_observer(&ObserverId::from("test")).unwrap().rev, done.rev);
+}
+
+// Beyond the brief: a self-merge is a cycle too, and a repeated merge is an
+// INV-5 no-op rather than a second revision.
+#[test]
+fn merge_self_is_a_cycle_and_re_merging_is_a_no_op() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = Clog::open(cfg(dir.path())).unwrap();
+    c.advance(1_000_000).unwrap();
+    let a = EntityRef { etype: "p".into(), id: "a".into(), name: None };
+    let b = EntityRef { etype: "p".into(), id: "b".into(), name: None };
+    assert!(matches!(c.merge_entities(&a, &a), Err(ClogError::AliasCycle)));
+    let first = c.merge_entities(&a, &b).unwrap();
+    assert_eq!(c.merge_entities(&a, &b).unwrap().rev, first.rev, "identical merge must not commit");
+    // §10 still applies to the entity refs a merge names
+    let bad = EntityRef { etype: "p".into(), id: String::new(), name: None };
+    assert!(matches!(c.merge_entities(&bad, &b), Err(ClogError::InvalidClaim { .. })));
+}
