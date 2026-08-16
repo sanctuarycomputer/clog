@@ -35,9 +35,6 @@ pub(crate) fn tests_base_claim() -> Claim {
 /// `ClogError::InvalidClaim` for host-side error reporting. `allow_reserved`
 /// is set only by internal writers (e.g. merge claims), which are permitted
 /// to use the `clog:` namespace reserved from hosts by INV-8.
-// Not yet called from production code: wired into `Clog::observe` by a
-// later task. Exercised directly by this module's tests in the meantime.
-#[allow(dead_code)]
 pub(crate) fn validate_claim(index: usize, c: &Claim, allow_reserved: bool) -> Result<(), ClogError> {
     fn has_control(s: &str) -> bool {
         s.chars().any(|ch| ch.is_control())
@@ -135,10 +132,6 @@ pub(crate) fn validate_claim(index: usize, c: &Claim, allow_reserved: bool) -> R
 /// Every weight key must name a defined kind; weight values and boost
 /// factors must be finite and strictly positive; `half_life_days` must lie
 /// in the open interval `(0.01, 3650)`.
-// Not yet called from production code: wired into `Clog::focus`/`observe`
-// by a later task. Exercised directly by this module's tests in the
-// meantime.
-#[allow(dead_code)]
 pub(crate) fn validate_focus(f: &Focus, taxonomy: &KindTaxonomy) -> Result<(), ClogError> {
     fn valid_factor(v: f32) -> bool {
         v.is_finite() && v > 0.0
@@ -169,9 +162,6 @@ pub(crate) fn validate_focus(f: &Focus, taxonomy: &KindTaxonomy) -> Result<(), C
 /// Clamps a timestamp for scoring purposes only (§10): values more than 24h
 /// beyond `now` are clamped to `now`. Storage always keeps the verbatim
 /// value; only scoring consumes this clamped result.
-// Not yet called from production code: consumed by `score.rs` (Task 4).
-// Exercised directly by this module's tests in the meantime.
-#[allow(dead_code)]
 pub(crate) fn scoring_clamp(ts: u64, now: u64) -> u64 {
     if ts > now + 86_400_000 {
         now

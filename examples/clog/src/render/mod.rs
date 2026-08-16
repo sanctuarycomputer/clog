@@ -16,19 +16,12 @@ use time::rfc3339_utc;
 /// Splits `body` on any whitespace run (`split_whitespace`) and rejoins
 /// with single spaces, then truncates to the first 120 **chars** (not
 /// bytes — a multi-byte char is never split).
-// Consumed by the engine tasks (11-15) that build the `*Item` structs
-// below, not by `render` itself: `render` treats each item's `headline`
-// field as already-normalized text.
-#[allow(dead_code)]
 pub(crate) fn headline(body: &str) -> String {
     let collapsed = body.split_whitespace().collect::<Vec<_>>().join(" ");
     collapsed.chars().take(120).collect()
 }
 
 /// A ranked urgent item (spec §5.8, `%{urgent}` slot).
-// Consumed by the engine tasks (11-15) that assemble `SlotInputs`; not yet
-// constructed by production code in this task.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct UrgentItem {
     /// Urgency score, rendered to one decimal place.
@@ -44,7 +37,6 @@ pub(crate) struct UrgentItem {
 }
 
 /// An open-loop item (spec §5.8, `%{open_loops}` slot).
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct LoopItem {
     /// The open-loop kind (e.g. `"question"`), rendered uppercased.
@@ -56,7 +48,6 @@ pub(crate) struct LoopItem {
 }
 
 /// An entity summary item (spec §5.8, `%{entities}` slot).
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct EntityItem {
     /// The entity's display name.
@@ -66,7 +57,6 @@ pub(crate) struct EntityItem {
 }
 
 /// A change since the last brief (spec §5.8, `%{changes}` slot).
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) enum ChangeItem {
     /// A newly surfaced headline, rendered `+ {headline}`.
@@ -79,7 +69,6 @@ pub(crate) enum ChangeItem {
 ///
 /// This is the engine-to-renderer contract: Tasks 11-15 build the
 /// `Vec<*Item>` fields from the live views.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct SlotInputs {
     /// The scope this document is rendered for.
@@ -166,7 +155,6 @@ fn configured_limit(t: &Template, name: SlotName) -> Option<usize> {
 /// the document fits, or nothing is left to drop. Truncation never cuts
 /// mid-item; each truncated slot gets (or updates) a trailing
 /// `… ({n} more)` marker with its total hidden count.
-#[allow(dead_code)]
 pub(crate) fn render(t: &Template, inputs: &SlotInputs, budget_chars: usize) -> String {
     let urgent_lines: Vec<String> = inputs
         .urgent

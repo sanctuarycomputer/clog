@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::alias::{AliasMap, EntityKey};
 use crate::types::{Claim, Focus, JudgeSource, KindLabel, ObserverId, Rev};
 
-mod naive;
+pub(crate) mod naive;
 
 /// A claim as stored by the engine, alongside when clog recorded it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -68,9 +68,6 @@ pub(crate) enum Event {
 }
 
 /// A batch of events committed together at a single revision.
-// Not yet constructed by production code: the WAL (a later task) writes and
-// reads these. Exercised directly by this module's tests in the meantime.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Batch {
     /// The revision this batch was committed at.
@@ -87,10 +84,6 @@ pub(crate) struct Batch {
 /// an all-floored group: every candidate fell below the belief threshold).
 /// `urgent` vectors are sorted score-desc, tie `claim_key`-asc, truncated to
 /// the scope's `top_k`.
-// Populated by the naive engine; most fields are not yet *read* by
-// production code (select/render consume them in later tasks). Exercised
-// directly by this module's and `naive`'s tests in the meantime.
-#[allow(dead_code)]
 #[derive(Clone, Default)]
 pub(crate) struct WorldViews {
     /// All live claims, keyed by `claim_key`, including reserved `clog:*` ones.
@@ -125,8 +118,11 @@ pub(crate) struct WorldViews {
 /// auditable oracle; see the build design §5); `touched=false` short-circuits
 /// when a batch applied zero effective events. Richer per-view diffs arrive
 /// in P2 when wakes need them.
-// `touched` is not yet read by production code: the actor (a later task)
-// short-circuits re-render on it. Exercised by `naive`'s tests meanwhile.
+// `touched` is not read by production code yet: P1's actor re-renders every
+// scope after every committed batch (and a batch with no effective events is
+// never committed at all, so `touched` would always be true there). The
+// short-circuit earns its keep in P2, when a tick can apply zero effective
+// events. Exercised by `naive`'s tests meanwhile.
 #[allow(dead_code)]
 pub(crate) struct ApplyResult {
     /// Whether the batch had any observable effect on `WorldViews`.
@@ -135,9 +131,6 @@ pub(crate) struct ApplyResult {
 
 /// The engine contract: applies WAL events to the materialized views and
 /// exposes the current snapshot for reading.
-// Not yet called from production code: the actor (a later task) drives the
-// naive engine through this trait. Exercised by `naive`'s tests meanwhile.
-#[allow(dead_code)]
 pub(crate) trait Engine: Send {
     /// Applies `events` to the materialized views, using `scopes` to
     /// recompute per-scope derived state (e.g. `urgent`) and `now_ms` as the

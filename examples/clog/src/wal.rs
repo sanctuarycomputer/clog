@@ -19,10 +19,6 @@ use crate::types::{ClogError, FsyncPolicy};
 const HEADER_LEN: usize = 8;
 
 /// A handle to the open WAL log file, ready to append further batches.
-// Not yet driven by production code: the actor (a later task) owns one and
-// appends each committed batch before applying it to the engine. Exercised
-// directly by this module's tests in the meantime.
-#[allow(dead_code)]
 pub(crate) struct Wal {
     file: File,
     fsync: FsyncPolicy,
@@ -32,9 +28,6 @@ impl Wal {
     /// Appends `batch` as one `[len][crc32][payload]` frame, fsyncing per
     /// `self`'s policy afterwards (`OnCommit` calls `sync_data`; `Never`
     /// does not sync).
-    // Not yet called from production code: the actor (a later task) appends
-    // every committed batch. Exercised directly by this module's tests.
-    #[allow(dead_code)]
     pub(crate) fn append(&mut self, batch: &Batch) -> Result<(), ClogError> {
         let payload = postcard::to_allocvec(batch)
             .map_err(|e| ClogError::Corrupt { detail: format!("wal encode: {e}") })?;
@@ -54,6 +47,16 @@ impl Wal {
         }
         Ok(())
     }
+
+    /// Fsyncs the log unconditionally, whatever the policy says.
+    ///
+    /// Called once by the writer thread on clean shutdown (spec §6.1), so
+    /// that `FsyncPolicy::Never` still means "no fsync *per commit*" rather
+    /// than "no fsync ever".
+    pub(crate) fn sync(&mut self) -> Result<(), ClogError> {
+        self.file.sync_data()?;
+        Ok(())
+    }
 }
 
 /// Opens (creating if needed) the WAL under `dir/wal/log`, replaying every
@@ -63,10 +66,6 @@ impl Wal {
 /// offending tail bytes are appended to `dir/wal/wal.corrupt` and the log
 /// is truncated to the last good frame boundary before replay stops (R2).
 /// Reopening afterwards is clean.
-// Not yet called from production code: the actor (a later task) opens the
-// WAL on startup. Exercised directly by this module's tests in the
-// meantime.
-#[allow(dead_code)]
 pub(crate) fn open_dir(dir: &Path, fsync: FsyncPolicy) -> Result<(Wal, Vec<Batch>), ClogError> {
     let wal_dir = dir.join("wal");
     fs::create_dir_all(&wal_dir)?;

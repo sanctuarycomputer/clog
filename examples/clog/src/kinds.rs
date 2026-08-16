@@ -51,9 +51,6 @@ impl CompiledRule {
 /// Holds `(kind_name, rules)` pairs in config order, with every
 /// `Matcher::BodyRegex` already compiled so `classify` never re-parses a
 /// regex on the hot path.
-// Not yet consumed by production code: wired into the cascade classifier by
-// a later task. Exercised directly by this module's tests in the meantime.
-#[allow(dead_code)]
 pub(crate) struct RuleSet {
     kinds: Vec<(String, Vec<CompiledRule>)>,
 }
@@ -69,9 +66,6 @@ pub(crate) struct RuleSet {
 /// variant for "state clog was handed is unusable" and config counts as
 /// state clog must trust. Revisit in P3 if a dedicated `InvalidConfig`
 /// variant earns its place.
-// Not yet consumed by production code: wired into the cascade classifier by
-// a later task. Exercised directly by this module's tests in the meantime.
-#[allow(dead_code)]
 pub(crate) fn compile(tax: &KindTaxonomy) -> Result<RuleSet, ClogError> {
     fn compile_matcher(m: &Matcher) -> Result<CompiledMatcher, ClogError> {
         Ok(match m {
@@ -109,9 +103,6 @@ pub(crate) fn compile(tax: &KindTaxonomy) -> Result<RuleSet, ClogError> {
 ///
 /// A rule matches when any of its matchers match (§5.6 `any_of`). Matches
 /// are always confidence `1.0` from `JudgeSource::Rule`.
-// Not yet consumed by production code: wired into the cascade classifier by
-// a later task. Exercised directly by this module's tests in the meantime.
-#[allow(dead_code)]
 pub(crate) fn classify(rs: &RuleSet, c: &Claim) -> Option<KindLabel> {
     for (kind, rules) in &rs.kinds {
         for rule in rules {

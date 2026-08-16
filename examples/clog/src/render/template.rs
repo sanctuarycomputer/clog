@@ -15,9 +15,6 @@
 use crate::types::ClogError;
 
 /// A slot name in the template grammar (spec §5.8).
-// Not yet consumed by production code: the renderer body lands in the
-// next task. Exercised directly by this module's tests in the meantime.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SlotName {
     /// `%{header}` — `{scope} · rev {rev} · {as_of RFC3339}`.
@@ -33,9 +30,6 @@ pub(crate) enum SlotName {
 }
 
 /// One parsed unit of a template: literal text, or a slot to be rendered.
-// Not yet consumed by production code: the renderer body lands in the
-// next task. Exercised directly by this module's tests in the meantime.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Segment {
     /// Literal text, emitted verbatim.
@@ -50,19 +44,12 @@ pub(crate) enum Segment {
 }
 
 /// A parsed template: an ordered sequence of segments.
-// Not yet consumed by production code: the renderer body lands in the
-// next task. Exercised directly by this module's tests in the meantime.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Template(pub Vec<Segment>);
 
 /// The default template (spec §5.8), used when `template == None`. Frozen
 /// byte-for-byte: the §11.4 golden tests (U-TMPL-3) depend on this exact
 /// string, including its trailing newline.
-// Not yet consumed by production code: wired in as the renderer's default
-// by a later task. Exercised directly by this module's tests in the
-// meantime.
-#[allow(dead_code)]
 pub(crate) const DEFAULT_TEMPLATE: &str = "\
 # situation · scope: %{header}
 
@@ -94,9 +81,6 @@ pub(crate) const DEFAULT_TEMPLATE: &str = "\
 /// fails to parse as a `usize` (including an empty value). Never panics
 /// on any input — malformed byte sequences produce an `Err`, not a panic
 /// (a fuzz target covers this in a later milestone).
-// Not yet consumed by production code: the renderer body lands in the
-// next task. Exercised directly by this module's tests in the meantime.
-#[allow(dead_code)]
 pub(crate) fn parse(src: &str) -> Result<Template, ClogError> {
     let mut segments = Vec::new();
     let mut rest = src;

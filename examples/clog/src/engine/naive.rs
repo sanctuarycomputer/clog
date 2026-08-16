@@ -90,9 +90,6 @@ fn index_remove<K: Ord + Clone>(idx: &mut OrdMap<K, OrdSet<String>>, k: &K, clai
 
 /// The knobs the naive engine needs from `Config`, extracted so the engine
 /// stays independent of the (larger, host-facing) `Config` type.
-// Not yet constructed by production code: the actor (a later task) builds
-// this from `Config`. Exercised directly by this module's tests meanwhile.
-#[allow(dead_code)]
 pub(crate) struct NaiveCfg {
     /// Kinds treated as open loops.
     pub loop_kinds: Vec<String>,
@@ -105,9 +102,6 @@ pub(crate) struct NaiveCfg {
 }
 
 /// The reference engine: applies events to [`WorldViews`] the obvious way.
-// Not yet constructed by production code: the actor (a later task) owns one.
-// Exercised directly by this module's tests in the meantime.
-#[allow(dead_code)]
 pub(crate) struct NaiveEngine {
     views: WorldViews,
     cfg: NaiveCfg,
@@ -115,10 +109,6 @@ pub(crate) struct NaiveEngine {
 
 impl NaiveEngine {
     /// An engine over an empty world.
-    // Not yet called from production code: the actor (a later task)
-    // constructs one. Exercised by this module's tests in the meantime;
-    // every other method here is reachable through the `Engine` impl.
-    #[allow(dead_code)]
     pub(crate) fn new(cfg: NaiveCfg) -> Self {
         NaiveEngine { views: WorldViews::default(), cfg }
     }
@@ -429,9 +419,6 @@ pub(crate) type EntityStateRow = (EntityKey, String, Vec<(String, StoredClaim)>)
 ///
 /// Rows are newest-first by `occurred_at`, ties broken by `claim_key` ascending
 /// (the same tiebreak `urgent` uses), then capped at [`ENTITY_STATE_ROWS`].
-// Not yet called from production code: the renderer's `entities` slot (a
-// later task) consumes this. Exercised by this module's tests meanwhile.
-#[allow(dead_code)]
 pub(crate) fn entity_state(views: &WorldViews) -> Vec<EntityStateRow> {
     let mut out = Vec::new();
     for (entity, keys) in views.by_entity.iter() {

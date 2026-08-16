@@ -9,10 +9,6 @@
 /// crate) to go from a day count to a calendar date; this is exact for
 /// every `u64` millisecond value representable here (no leap seconds are
 /// modeled, matching Unix time).
-// Not yet consumed by production code: used by the renderer's `header`
-// slot in a later task. Exercised directly by this module's tests in the
-// meantime.
-#[allow(dead_code)]
 pub(crate) fn rfc3339_utc(ms: u64) -> String {
     let secs = ms / 1000;
     let (days, rem) = (secs / 86_400, secs % 86_400);
