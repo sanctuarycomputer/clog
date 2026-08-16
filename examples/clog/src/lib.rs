@@ -26,3 +26,7 @@ pub(crate) mod alias;
 /// Rules-tier classifier: the free, deterministic first tier of the
 /// cascade classifier (spec §5.6).
 pub(crate) mod kinds;
+
+/// Deterministic rendering: template parsing, RFC3339 timestamps, and (in
+/// a later task) the slot renderer itself (spec §5.8).
+pub(crate) mod render;
