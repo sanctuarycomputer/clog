@@ -1,3 +1,5 @@
 /target
 target/
 .DS_Store
+# clog demo REPL store (created wherever the example is run)
+clog-repl-data/

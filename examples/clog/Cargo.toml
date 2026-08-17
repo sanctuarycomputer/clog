@@ -1,0 +1,25 @@
+[package]
+name = "clog"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Orientation engine for agentic systems: claims in, ranked situations out."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+imbl = "6"
+arc-swap = "1"
+crossbeam-channel = "0.5"
+postcard = { version = "1", features = ["use-std"] }
+crc32fast = "1"
+regex = "1"
+
+[dev-dependencies]
+proptest = "1"
+insta = "1"
+tempfile = "3"
+
+[features]
+# test-crash compiles the crash-injection hook used by the R1 harness (Task 17)
+test-crash = []

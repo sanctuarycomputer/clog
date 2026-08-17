@@ -1,0 +1,32 @@
+---
+source: examples/clog/tests/g1_agency.rs
+expression: "c.situation(Some(\"cash-and-collections\"), None).unwrap().text"
+---
+# situation · scope: cash-and-collections · rev 1 · 2024-10-07T00:00:00Z
+
+## urgent
+1. (1.2) Invoice 1042 is 30 days overdue [B/2] (halcyon:inv-1042:v1)
+2. (1.0) Halcyon deliverable is slipping by a week [B/3] (halcyon:deliverable:slip)
+3. (0.9) Inbound lead from Vega Labs [B/2] (vega:lead:inbound)
+4. (0.6) Did Meridian sign the SOW? [B/2] (meridian:question:sow)
+5. (0.4) Vega mentioned maybe expanding scope [C/3] (vega:upsell:maybe)
+6. (0.3) Meridian kickoff moved to Thursday [B/2] (meridian:kickoff:moved)
+7. (0.3) Sam is on PTO next week [C/2] (meridian:pto:sam)
+
+## open loops
+- RISK Halcyon deliverable is slipping by a week (halcyon:deliverable:slip)
+- RISK Invoice 1042 is 30 days overdue (halcyon:inv-1042:v1)
+- QUESTION Did Meridian sign the SOW? (meridian:question:sow)
+
+## entities
+Samuel: Sam is on PTO next week
+Halcyon: Halcyon deliverable is slipping by a week; Invoice 1042 is 30 days overdue
+
+## changes since last brief
++ Halcyon deliverable is slipping by a week
++ Invoice 1042 is 30 days overdue
++ Meridian kickoff moved to Thursday
++ Sam is on PTO next week
++ Did Meridian sign the SOW?
++ Inbound lead from Vega Labs
+… (1 more)
