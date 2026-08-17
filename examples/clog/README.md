@@ -115,6 +115,34 @@ fn claim(key: &str, body: &str) -> Claim {
 }
 ```
 
+## Demo REPL
+
+For a live, narratable demo (and a fast way to poke at the engine):
+
+```console
+cargo run -p clog --example repl            # opens ./clog-repl-data
+cargo run -p clog --example repl -- --fresh # wipe the store first
+```
+
+It boots the G1 agency world (two lenses, eleven claims, three of them
+competing over one invoice) frozen mid-story, and re-prints the situation
+document after every command. `help` lists the commands. A five-beat stage
+script:
+
+1. `obs Server bill overdue again` — watch the rules tier classify it as a
+   risk and rank it into `urgent` live, differently per lens.
+2. `retract halcyon:inv-1042:v2` — the stale "still overdue" claim dies and
+   belief on the invoice flips to the bank-feed payment; the entities line
+   heals in front of you.
+3. `merge person:samuel person:sam` — two entity rows consolidate into one.
+4. `scope cash-and-collections` — same world, different ranking (fyi damped,
+   opportunity boosted).
+5. `crash`, then relaunch — the process aborts mid-session and the WAL
+   restores everything, including your own observations. That's INV-11.
+
+The store persists between runs (`reset` reseeds it); seeding is idempotent
+because re-observing byte-identical claims is invisible (INV-5).
+
 ## Config knobs
 
 All fields on `Config`; build one with `Config::default_for(path)` and
